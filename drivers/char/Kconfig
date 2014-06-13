@@ -609,5 +609,11 @@ config TILE_SROM
 
 source "drivers/char/xillybus/Kconfig"
 
+config EPIPHANY
+        tristate "Epiphany device"
+        default y
+        help
+          Support for the /dev/epiphany device.
+
 endmenu
 
