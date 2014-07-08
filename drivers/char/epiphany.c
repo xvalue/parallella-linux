@@ -169,19 +169,26 @@ static const struct vm_operations_struct mmap_mem_ops = {
  */
 static int epiphany_map_host_memory(struct vm_area_struct *vma)
 {
+	int err;
 	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 
-	printk(KERN_DEBUG
-	       "Mapping host memory to vma 0x%08lx, size 0x%08lx, page "
-	       "offset 0x%08lx\n", vma->vm_start, vma->vm_end - vma->vm_start,
-	       vma->vm_pgoff);
-	return remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff,
-			       vma->vm_end - vma->vm_start, vma->vm_page_prot);
+
+	err = remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff,
+			vma->vm_end - vma->vm_start, vma->vm_page_prot);
+
+	if (err) {
+		printk(KERN_ERR "Failed mapping host memory to vma 0x%08lx, "
+				"size 0x%08lx, page offset 0x%08lx\n",
+				vma->vm_start, vma->vm_end - vma->vm_start,
+				vma->vm_pgoff);
+	}
+
+	return err;
 }
 
 static int epiphany_map_device_memory(struct vm_area_struct *vma)
 {
-	int retval = 0;
+	int err, retval = 0;
 	unsigned long pfn = vma->vm_pgoff;
 	unsigned long size = vma->vm_end - vma->vm_start;
 
@@ -192,15 +199,14 @@ static int epiphany_map_device_memory(struct vm_area_struct *vma)
 	pfn = (EPIPHANY_MEM_START + off) >> PAGE_SHIFT;
 #endif
 
-	printk(KERN_DEBUG
-	       "Mapping device memory to vma 0x%08lx, size 0x%08lx, page "
-	       "offset 0x%08lx\n", vma->vm_start, vma->vm_end - vma->vm_start,
-	       vma->vm_pgoff);
+	err = io_remap_pfn_range(vma, vma->vm_start, pfn, size,
+			vma->vm_page_prot);
 
-	if (io_remap_pfn_range(vma, vma->vm_start, pfn, size,
-			       vma->vm_page_prot)) {
-		printk(KERN_ERR
-		       "epiphany_mmap - failed to map the device memory\n");
+	if (err) {
+		printk(KERN_ERR "Failed mapping device memory to vma 0x%08lx, "
+				"size 0x%08lx, page offset 0x%08lx\n",
+				vma->vm_start, vma->vm_end - vma->vm_start,
+				vma->vm_pgoff);
 		retval = -EAGAIN;
 	}
 
@@ -213,10 +219,6 @@ static int epiphany_mmap(struct file *file, struct vm_area_struct *vma)
 	unsigned long off = vma->vm_pgoff << PAGE_SHIFT;
 	unsigned long size = vma->vm_end - vma->vm_start;
 
-	printk(KERN_DEBUG
-	       "epiphany_mmap - request to map 0x%08lx, length 0x%08lx bytes\n",
-	       off, size);
-
 	vma->vm_ops = &mmap_mem_ops;
 
 	if ((EPIPHANY_MEM_START <= off ) && ((off + size) <= EPIPHANY_MEM_END)) {
@@ -226,8 +228,8 @@ static int epiphany_mmap(struct file *file, struct vm_area_struct *vma)
 	} else if ((HOST_MEM_START <= off) && ((off + size) <= HOST_MEM_END)) {
 		retval = epiphany_map_host_memory(vma);
 	} else {
-		printk(KERN_INFO
-		       "epiphany_mmap - invalid request\n");
+		printk(KERN_DEBUG "epiphany_mmap - invalid request to map "
+				"0x%08lx, length 0x%08lx bytes\n", off, size);
 		retval = -EINVAL;
 	}
 
