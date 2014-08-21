@@ -2,8 +2,8 @@
 
 / {
 	/*option1: full console, has been know to get stuck sometimes with screen connected*/
-	/*option2: without console
-	/*option3: use root file system on usb connected disk
+	/*option2: without console */
+	/*option3: use root file system on usb connected disk */
   	chosen {
 	        bootargs = "console=ttyPS0,115200 root=/dev/mmcblk0p2 rw earlyprintk rootfstype=ext4 rootwait";
 		//1. bootargs = "console=ttyPS0,115200 root=/dev/mmcblk0p2 rw earlyprintk rootfstype=ext4 rootwait";
