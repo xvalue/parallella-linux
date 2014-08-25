@@ -609,7 +609,7 @@ config TILE_SROM
 
 config EPIPHANY
         tristate "Epiphany device"
-        default y
+        default n
         help
           Support for the /dev/epiphany device.
 

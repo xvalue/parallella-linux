@@ -1,5 +1,12 @@
 2014-07-22  Ben Chaco  <bchaco@x3-c.com>
 
+	* arch/arm/configs/parallella_defconfig:
+	Epiphany driver builtin by default
+	* drivers/char/Kconfig:
+	Epiphany driver not builtin by default
+
+2014-07-22  Ben Chaco  <bchaco@x3-c.com>
+
 	* drivers/char/epiphany.c (static int epiphany_init):
 	* include/uapi/linux/epiphany.h:
 	Removed epiphany Shared Memory type definitions and initialization.

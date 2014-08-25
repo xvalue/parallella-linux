@@ -184,6 +184,9 @@ CONFIG_UIO_DMEM_GENIRQ=y
 ###PARALLELLA
 ###############################################################################
 
+#epiphany driver
+CONFIG_EPIPHANY=y
+
 #networking
 CONFIG_BRIDGE=y
 CONFIG_IPV6=y
