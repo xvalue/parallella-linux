@@ -67,7 +67,7 @@ static int epiphany_init(void)
 	result = cdev_add(epiphany_cdev, dev_no, 1);
 	if (result < 0) {
 		printk(KERN_INFO
-		       "epiphany_init() - Unable to add character device");
+		       "epiphany_init() - Unable to add character device\n");
 	}
 
 	class_epiphany = class_create(THIS_MODULE, DRIVER_NAME);
@@ -103,7 +103,7 @@ static int epiphany_init(void)
 	if (!global_shm.kvirt_addr) {
 		printk(KERN_ERR
 		       "epiphany_init() - Unable to allocate contiguous "
-		       "memory for global shared region");
+		       "memory for global shared region\n");
 		goto err;
 	}
 
@@ -115,7 +115,7 @@ static int epiphany_init(void)
 	memset((void *)global_shm.kvirt_addr, 0, GLOBAL_SHM_SIZE);
 
 	printk(KERN_INFO
-	       "epiphany_init() - shared memory: bus 0x%08lx, phy 0x%08lx, kvirt 0x%08lx",
+	       "epiphany_init() - shared memory: bus 0x%08lx, phy 0x%08lx, kvirt 0x%08lx\n",
 	       global_shm.bus_addr, global_shm.phy_addr, global_shm.kvirt_addr);
 
 	return 0;
@@ -164,9 +164,9 @@ static int epiphany_map_host_memory(struct vm_area_struct *vma)
 {
 	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 
-	printk(KERN_INFO
+	printk(KERN_DEBUG
 	       "Mapping host memory to vma 0x%08lx, size 0x%08lx, page "
-	       "offset 0x%08lx", vma->vm_start, vma->vm_end - vma->vm_start,
+	       "offset 0x%08lx\n", vma->vm_start, vma->vm_end - vma->vm_start,
 	       vma->vm_pgoff);
 	return remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff,
 			       vma->vm_end - vma->vm_start, vma->vm_page_prot);
@@ -185,9 +185,9 @@ static int epiphany_map_device_memory(struct vm_area_struct *vma)
 	pfn = (EPIPHANY_MEM_START + off) >> PAGE_SHIFT;
 #endif
 
-	printk(KERN_INFO
+	printk(KERN_DEBUG
 	       "Mapping device memory to vma 0x%08lx, size 0x%08lx, page "
-	       "offset 0x%08lx", vma->vm_start, vma->vm_end - vma->vm_start,
+	       "offset 0x%08lx\n", vma->vm_start, vma->vm_end - vma->vm_start,
 	       vma->vm_pgoff);
 
 	if (io_remap_pfn_range(vma, vma->vm_start, pfn, size,
@@ -206,7 +206,7 @@ static int epiphany_mmap(struct file *file, struct vm_area_struct *vma)
 	unsigned long off = vma->vm_pgoff << PAGE_SHIFT;
 	unsigned long size = vma->vm_end - vma->vm_start;
 
-	printk(KERN_INFO
+	printk(KERN_DEBUG
 	       "epiphany_mmap - request to map 0x%08lx, length 0x%08lx bytes\n",
 	       off, size);
 
@@ -216,6 +216,10 @@ static int epiphany_mmap(struct file *file, struct vm_area_struct *vma)
 		retval = epiphany_map_device_memory(vma);
 	} else if (off == (unsigned long)&global_shm) {
 		retval = epiphany_map_host_memory(vma);
+	} else {
+		printk(KERN_INFO
+		       "epiphany_mmap - invalid request\n");
+		retval = -EINVAL;
 	}
 
 	return retval;
@@ -253,7 +257,7 @@ static long epiphany_ioctl(struct file *file, unsigned int cmd,
 	case EPIPHANY_IOC_GETSHM:
 		ealloc = (epiphany_alloc_t *) (arg);
 		if (copy_to_user(ealloc, &global_shm, sizeof(*ealloc))) {
-			printk(KERN_ERR "EPIPHANY_IOC_GETSHM - failed");
+			printk(KERN_ERR "EPIPHANY_IOC_GETSHM - failed\n");
 			retval = -EACCES;
 		}
 
