@@ -21,7 +21,11 @@ MODULE_LICENSE("GPL");
 
 /* The physical address of the start and end of the Epiphany device memory */
 #define EPIPHANY_MEM_START      0x80800000UL
-#define EPIPHANY_MEM_END        0xBFFFFFFFUL
+#define EPIPHANY_MEM_END        0xC0000000UL
+
+/* The physical address of the DRAM shared between the host and Epiphany */
+#define HOST_MEM_START          0x3E000000UL
+#define HOST_MEM_END            0x40000000UL
 
 /* Function prototypes */
 static int epiphany_init(void);
@@ -87,9 +91,9 @@ static int epiphany_init(void)
 	 */
 	global_shm.size = GLOBAL_SHM_SIZE;
 	global_shm.flags = 0;
-	global_shm.bus_addr = 0x8e000000 + 0x01000000;	/* From platform.hdf + shared_dram offset */
-	global_shm.phy_addr = 0x3e000000 + 0x01000000;	/* From platform.hdf + shared_dram offset */
-	global_shm.kvirt_addr = (unsigned long)ioremap(global_shm.phy_addr, 0x01000000);	/* FIXME: not portable */
+	global_shm.bus_addr = 0x8e000000     + 0x01000000;	/* From platform.hdf + shared_dram offset */
+	global_shm.phy_addr = HOST_MEM_START + 0x01000000;	/* From platform.hdf + shared_dram offset */
+	global_shm.kvirt_addr = (unsigned long)ioremap_nocache(global_shm.phy_addr, 0x01000000);	/* FIXME: not portable */
 	global_shm.uvirt_addr = 0;	/* Set by user when mmapped */
 	global_shm.mmap_handle = global_shm.phy_addr;
 #else
@@ -212,9 +216,9 @@ static int epiphany_mmap(struct file *file, struct vm_area_struct *vma)
 
 	vma->vm_ops = &mmap_mem_ops;
 
-	if ((off >= EPIPHANY_MEM_START) || ((off + size) <= EPIPHANY_MEM_END)) {
+	if ((EPIPHANY_MEM_START <= off ) && ((off + size) <= EPIPHANY_MEM_END)) {
 		retval = epiphany_map_device_memory(vma);
-	} else if (off == (unsigned long)&global_shm) {
+	} else if ((HOST_MEM_START <= off) && ((off + size) <= HOST_MEM_END)) {
 		retval = epiphany_map_host_memory(vma);
 	} else {
 		printk(KERN_INFO
