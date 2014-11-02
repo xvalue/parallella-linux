@@ -547,6 +547,12 @@ config XILINX_JESD204B
 
 	  If unsure, say N
 
+config EPIPHANY
+	tristate "Adapteva Epiphany driver"
+	default n
+	help
+	  Epiphany...
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"
