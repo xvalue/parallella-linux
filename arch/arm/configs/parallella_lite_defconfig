@@ -1457,8 +1457,8 @@ CONFIG_I2C_GPIO=y
 # CONFIG_I2C_PCA_PLATFORM is not set
 # CONFIG_I2C_PXA_PCI is not set
 # CONFIG_I2C_SIMTEC is not set
-CONFIG_I2C_ZYNQ=y
 CONFIG_I2C_XILINX=y
+CONFIG_I2C_CADENCE=y
 
 #
 # External I2C/SMBus adapter drivers
