@@ -2,13 +2,13 @@
 /include/ "zynq-parallella1.dtsi"
 
 / {
-       chosen {
-	        bootargs = "console=ttyPS0,115200 root=/dev/mmcblk0p2 rw earlyprintk rootfstype=ext4 rootwait";
+	chosen {
+		bootargs = "root=/dev/mmcblk0p2 rw earlyprintk rootfstype=ext4 rootwait";
 		//1. bootargs = "console=ttyPS0,115200 root=/dev/mmcblk0p2 rw earlyprintk rootfstype=ext4 rootwait";
-	        //2. bootargs = "root=/dev/mmcblk0p2 rw earlyprintk rootfstype=ext4 rootwait";
-	        //3. bootargs = "console=ttyPS0,115200 root=/dev/sda1 rw earlyprintk rootfstype=ext4 rootwait";
-                linux,stdout-path = "/amba@0/serial@e0001000";
-        } ;
+		//2. bootargs = "root=/dev/mmcblk0p2 rw earlyprintk rootfstype=ext4 rootwait";
+		//3. bootargs = "console=ttyPS0,115200 root=/dev/sda1 rw earlyprintk rootfstype=ext4 rootwait";
+		linux,stdout-path = "/amba@0/serial@e0001000";
+	} ;
 
 	fpga_axi: fpga-axi@0 {
 		compatible = "simple-bus";
