@@ -523,6 +523,7 @@ dtb-$(CONFIG_ARCH_ZYNQ) += \
 	zynq-afx-nor.dtb \
 	zynq-cc108.dtb \
 	zynq-parallella.dtb \
+	zynq-parallella-headless.dtb \
 	zynq-parallella-microserver.dtb \
 	zynq-zc702.dtb \
 	zynq-zc706.dtb \
