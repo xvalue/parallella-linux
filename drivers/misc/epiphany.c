@@ -131,6 +131,10 @@ struct mem_region {
 struct epiphany_device {
 	struct platform_device *pdev;
 
+	void __iomem *emesh;
+	phys_addr_t emesh_start;
+	size_t emesh_size;
+
 	struct list_head elink_list;
 	struct list_head connection_list;
 	struct list_head mem_region_list;
@@ -511,6 +515,8 @@ static int dt_probe(struct epiphany_device *epiphany)
 {
 	struct platform_device *pdev = epiphany->pdev;
 	struct device *dev = &pdev->dev;
+	struct device_node *np;
+	struct resource res;
 	int err;
 
 	err = dt_probe_reserved_mem(epiphany);
@@ -518,6 +524,25 @@ static int dt_probe(struct epiphany_device *epiphany)
 		dev_warn(dev, "dt: error parsing reserved memory.\n");
 		return err;
 	}
+
+	np = of_get_child_by_name(dev->of_node, "epiphany-mesh");
+	if (!np) {
+		dev_warn(dev, "dt: no epiphany-mesh node\n");
+		return -ENOENT;
+	}
+	err = of_address_to_resource(np, 0, &res);
+	if (err) {
+		dev_warn(dev, "dt: no resource\n");
+		return err;
+	}
+	if (!devm_request_mem_region(dev, res.start, resource_size(&res),
+				     np->full_name)) {
+		dev_warn(dev, "epiphany-mesh: failed requesting mem region\n");
+		return -ENOMEM;
+	}
+	epiphany->emesh_start = res.start;
+	epiphany->emesh_size = resource_size(&res);
+
 	err = dt_probe_connections(epiphany);
 	if (err) {
 		dev_warn(dev, "dt: error parsing connections.\n");
