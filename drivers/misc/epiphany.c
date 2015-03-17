@@ -407,6 +407,27 @@ static int reset_elink(struct epiphany_device *epiphany, struct elink *elink)
 	return retval;
 }
 
+static void disable_elink(struct elink *elink)
+{
+	union e_syscfg_clk clkcfg;
+	union e_syscfg_tx txcfg;
+	union e_syscfg_rx rxcfg;
+
+	clkcfg.reg = reg_read(elink->regs, E_SYS_CFGCLK);
+	txcfg.reg = reg_read(elink->regs, E_SYS_CFGTX);
+	rxcfg.reg = reg_read(elink->regs, E_SYS_CFGRX);
+
+	clkcfg.divider = 0;
+	txcfg.enable = 0;
+	rxcfg.enable = 0;
+
+	reg_write(clkcfg.reg, elink->regs, E_SYS_CFGCLK);
+	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
+	reg_write(rxcfg.reg, elink->regs, E_SYS_CFGRX);
+
+	epiphany_sleep();
+}
+
 static int epiphany_char_open(struct inode *inode, struct file *file)
 {
 	int retval = 0;
@@ -447,6 +468,7 @@ mtx_unlock:
 static int epiphany_char_release(struct inode *inode, struct file *file)
 {
 	struct epiphany_device *epiphany;
+	struct elink *elink;
 	struct chip_array *array;
 
 	epiphany = to_epiphany_device(file);
@@ -458,6 +480,9 @@ static int epiphany_char_release(struct inode *inode, struct file *file)
 
 	if (!epiphany->u_count) {
 		/* if (!epiphany->param_no_powersave) */
+		list_for_each_entry(elink, &epiphany->elink_list, list)
+			disable_elink(elink);
+
 		list_for_each_entry(array, &epiphany->chip_array_list, list) {
 			if (array->supply)
 				regulator_disable(array->supply);
