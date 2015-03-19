@@ -12,6 +12,7 @@
 #include <linux/list.h>
 #include <linux/miscdevice.h>
 #include <linux/uaccess.h>
+#include <linux/mutex.h>
 
 #include "epiphany.h"
 
@@ -24,6 +25,8 @@
 #define COORDS(row, col) ((row) * 64 | (col))
 #define ROW(coreid) ((coreid) / 64)
 #define COL(coreid) ((coreid) % 64)
+
+static DEFINE_MUTEX(driver_lock);
 
 enum elink_side {
 	E_SIDE_N = 0,
@@ -160,6 +163,8 @@ struct mem_region {
 };
 
 struct epiphany_device {
+	int u_count; /* User count */
+
 	struct platform_device *pdev;
 
 	void __iomem *emesh;
@@ -197,11 +202,43 @@ static inline struct epiphany_device *to_epiphany_device(struct file *file)
 
 static int epiphany_char_open(struct inode *inode, struct file *file)
 {
+	struct epiphany_device *epiphany;
+
+	epiphany = to_epiphany_device(file);
+
+	if (mutex_lock_interruptible(&driver_lock))
+		return -ERESTARTSYS;
+
+	if (!epiphany->u_count) {
+		/* if !epiphany->param_no_reset (or no power mgmt) */
+		/* reset_system(epiphany) */
+	}
+
+	epiphany->u_count++;
+
+	mutex_unlock(&driver_lock);
+
 	return 0;
 }
 
 static int epiphany_char_release(struct inode *inode, struct file *file)
 {
+	struct epiphany_device *epiphany;
+
+	epiphany = to_epiphany_device(file);
+
+	/* Not sure if interruptible is a good idea here ... */
+	mutex_lock(&driver_lock);
+
+	epiphany->u_count--;
+
+	if (!epiphany->u_count) {
+		/* if (!epiphany->param_no_powersave) */
+		/* shutdown system */
+		dev_dbg(&epiphany->pdev->dev, "no users\n");
+	}
+
+	mutex_unlock(&driver_lock);
 	return 0;
 }
 
