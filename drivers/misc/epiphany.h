@@ -15,6 +15,19 @@ enum e_sys_reg_id {
 	E_SYS_GPIOOUT		= 0x005c
 };
 
+/* Chip registers */
+enum e_chip_regs {
+	E_REG_LINKCFG		= 0xf0300,
+	E_REG_LINKTXCFG		= 0xf0304,
+	E_REG_LINKRXCFG		= 0xf0308,
+	E_REG_GPIOCFG		= 0xf030c,
+	E_REG_FLAGCFG		= 0xf0318,
+	E_REG_SYNC		= 0xf031c,
+	E_REG_HALT		= 0xf0320,
+	E_REG_RESET		= 0xf0324,
+	E_REG_LINKDEBUG		= 0xf0328
+};
+
 enum e_ctrlmode {
 	E_CTRLMODE_NORMAL	= 0,
 	E_CTRLMODE_DMA0_LAST	= 4,

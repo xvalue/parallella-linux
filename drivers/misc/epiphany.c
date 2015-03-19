@@ -22,6 +22,8 @@
 #define MAX_ELINK_BRIDGES	256
 #define MAX_CONNECTIONS		1024
 
+#define COREID_SHIFT 20
+
 /* Be careful, no range check */
 #define COORDS(row, col) ((row) * 64 | (col))
 #define ROW(coreid) ((coreid) / 64)
@@ -51,12 +53,13 @@ static const u32 ctrlmode_hints[E_SIDE_MAX] = {
 	[E_SIDE_W] = E_CTRLMODE_WEST
 };
 
-static const struct {
+struct epiphany_chip_info {
 	int rows;
 	int cols;
 	size_t core_mem;
 	u16 elink_coreid[E_SIDE_MAX]; /* relative */
-} epiphany_chip_info[E_CHIP_MAX] = {
+};
+static const struct epiphany_chip_info epiphany_chip_info[E_CHIP_MAX] = {
 	[E_CHIP_E16G301] = {
 		.rows = 4,
 		.cols = 4,
@@ -191,6 +194,7 @@ static inline void epiphany_sleep(void)
 static inline void reg_write(u32 value, void __iomem *base, u32 offset)
 {
 	iowrite32(value, (u8 __iomem *)base + offset);
+	epiphany_sleep();
 }
 
 static inline u32 reg_read(void __iomem *base, u32 offset)
@@ -203,11 +207,199 @@ static inline struct epiphany_device *to_epiphany_device(struct file *file)
 	return container_of(file->private_data, struct epiphany_device, misc);
 }
 
+static struct chip_array *get_adjacent_chip_array(struct connection *edge,
+						  void *w, u16 *rel_coreid)
+{
+	if (w == edge->u) {
+		if (edge->v_is_host_bridge)
+			return NULL;
+		if (rel_coreid)
+			*rel_coreid = edge->v_rel_coreid;
+		return (struct chip_array *) edge->v;
+	}
+	if (w == edge->v) {
+		if (edge->u_is_host_bridge)
+			return NULL;
+		if (rel_coreid)
+			*rel_coreid = edge->u_rel_coreid;
+		return (struct chip_array *) edge->u;
+	}
+
+	WARN_ON(w != edge->u && w != edge->v);
+	return NULL;
+}
+
+static u16 get_adjacent_abs_coreid(struct connection *edge, void *w)
+{
+	struct chip_array *array;
+	u16 rel_coreid;
+
+	array = get_adjacent_chip_array(edge, w, &rel_coreid);
+	WARN_ON(!array);
+	if (!array)
+		return 0;
+
+	return (array->id + rel_coreid);
+}
+
+static u32 get_adjacent_linkreg_ctrlmode(struct connection *edge, void *w)
+{
+	u16 arr_coreid, chip_coreid, arr_row, arr_col, chip_row, chip_col;
+	struct chip_array *array;
+	u32 ctrlmode = 0;
+	const struct epiphany_chip_info *cinfo;
+	int i;
+
+	array = get_adjacent_chip_array(edge, w, &arr_coreid);
+	WARN_ON(!array);
+	if (!array)
+		return 0;
+
+	cinfo = &epiphany_chip_info[array->chip_type];
+	arr_row = ROW(arr_coreid);
+	arr_col = COL(arr_coreid);
+	chip_row = arr_row % cinfo->rows;
+	chip_col = arr_col % cinfo->cols;
+	chip_coreid = COORDS(chip_row, chip_col);
+
+	for (i = 0; i < E_SIDE_MAX; i++) {
+		if (cinfo->elink_coreid[i] == chip_coreid) {
+			ctrlmode = ctrlmode_hints[i];
+			break;
+		}
+	}
+	WARN_ON(!ctrlmode);
+
+	return ctrlmode;
+}
+
+static int coreid_to_phys(struct epiphany_device *epiphany, u16 coreid,
+			  phys_addr_t *out)
+{
+	phys_addr_t phys =
+		((phys_addr_t) coreid) << ((phys_addr_t) COREID_SHIFT);
+
+	if (phys < epiphany->emesh_start ||
+	    phys - epiphany->emesh_start >= epiphany->emesh_size)
+		return -ERANGE;
+
+	*out = phys;
+
+	return 0;
+}
+
+/* Reset the Epiphany platform */
+static int reset_elink(struct epiphany_device *epiphany, struct elink *elink)
+{
+	int err, retval = 0;
+	struct device *dev = &epiphany->pdev->dev;
+	unsigned int divider;
+	union e_syscfg_tx txcfg = {0};
+	union e_syscfg_rx rxcfg = {0};
+	union e_syscfg_clk clkcfg = {0};
+	bool need_div_elink_tx;
+	u32 offset;
+	u16 coreid;
+	phys_addr_t core, paddr;
+	void __iomem *core_mem;
+	struct chip_array *array;
+
+	epiphany_sleep();
+
+	/* Assert reset */
+	reg_write(1, elink->regs, E_SYS_RESET);
+
+	/* Disable TX */
+	txcfg.reg = 0;
+	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
+
+	/* Disable RX */
+	rxcfg.reg = 0;
+	reg_write(rxcfg.reg, elink->regs, E_SYS_CFGRX);
+
+	/* Start C-clock */
+	clkcfg.divider = 7; /* Full speed */
+	reg_write(clkcfg.reg, elink->regs, E_SYS_CFGCLK);
+
+	/* Stop C-clock for setup/hold time on reset */
+	clkcfg.divider = 0;
+	reg_write(clkcfg.reg, elink->regs, E_SYS_CFGCLK);
+
+	/* Deassert reset */
+	reg_write(0, elink->regs, E_SYS_RESET);
+
+	/* Restart C-clock */
+	clkcfg.divider = 7; /* Full speed */
+	reg_write(clkcfg.reg, elink->regs, E_SYS_CFGCLK);
+
+	/* Start TX L-clock */
+	txcfg.clkmode = 0; /* Full speed */
+	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
+
+	/* enable eLink TX */
+	txcfg.enable  = 1;
+	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
+
+	/* Enable eLink RX */
+	rxcfg.enable = 1;
+	reg_write(rxcfg.reg, elink->regs, E_SYS_CFGRX);
+
+	array = get_adjacent_chip_array(elink->connection, elink, NULL);
+	if (array) {
+		coreid = get_adjacent_abs_coreid(elink->connection, elink);
+
+		err = coreid_to_phys(epiphany, coreid, &core);
+		WARN_ON(err);
+		if (err) {
+			retval = err;
+			goto out;
+		}
+		offset = E_REG_LINKCFG;
+
+		txcfg.ctrlmode =
+			get_adjacent_linkreg_ctrlmode(elink->connection, elink);
+
+		/* TODO: Check core voltage (of all supplies). Assume it is
+		 * required for now. */
+		need_div_elink_tx = 1;
+		if (need_div_elink_tx) {
+			divider = 1; /* Divide by 4, see data sheet */
+			dev_dbg(dev, "found platform type that requires programming the link clock divider.\n");
+		} else {
+			divider = 0; /* Divide by 2 */
+		}
+
+		paddr = (core | E_REG_LINKCFG) & PAGE_MASK;
+		offset = E_REG_LINKCFG & ~(PAGE_MASK);
+		core_mem = ioremap_nocache(paddr, PAGE_SIZE);
+		if (!core_mem) {
+			dev_warn(dev, "Mapping emesh address space failed.\n");
+			retval = -ENOMEM;
+			goto out;
+		}
+
+		reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
+
+		reg_write(divider, core_mem, offset);
+
+		txcfg.ctrlmode = 0;
+		reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
+
+		iounmap(core_mem);
+	}
+
+out:
+	epiphany_sleep();
+	return retval;
+
+}
+
 static int epiphany_char_open(struct inode *inode, struct file *file)
 {
 	int retval = 0;
 	struct epiphany_device *epiphany;
 	struct chip_array *array;
+	struct elink *elink;
 
 	epiphany = to_epiphany_device(file);
 
@@ -216,7 +408,6 @@ static int epiphany_char_open(struct inode *inode, struct file *file)
 
 	if (!epiphany->u_count) {
 		/* if !epiphany->param_no_reset (or no power mgmt) */
-		/* reset_system(epiphany) */
 
 		list_for_each_entry(array, &epiphany->chip_array_list, list) {
 			if (array->supply)
@@ -225,6 +416,10 @@ static int epiphany_char_open(struct inode *inode, struct file *file)
 					retval = -EIO;
 					goto mtx_unlock;
 				}
+		}
+
+		list_for_each_entry(elink, &epiphany->elink_list, list) {
+			reset_elink(epiphany, elink);
 		}
 	}
 
