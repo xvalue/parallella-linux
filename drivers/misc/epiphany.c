@@ -34,6 +34,7 @@ enum elink_side {
 };
 
 enum e_chip_type {
+	E_CHIP_INVAL = 0,
 	E_CHIP_E16G301,
 	E_CHIP_E64G401,
 	E_CHIP_MAX
@@ -74,6 +75,31 @@ static const struct {
 	}
 };
 
+enum elink_generation {
+	E_GEN_INVAL = 0,
+	E_GEN_PARALLELLA1,
+	E_GEN_MAX
+};
+
+enum elink_platform {
+	E_PLATF_INVAL = 0,
+	E_PLATF_E16_7Z020_GPIO,
+	E_PLATF_E16_7Z020_NO_GPIO,
+	E_PLATF_E16_7Z010_GPIO,
+	E_PLATF_E16_7Z010_NO_GPIO,
+	E_PLATF_E64_7Z020_GPIO,
+	E_PLATF_MAX
+};
+
+static const enum e_chip_type elink_platform_chip_match[E_PLATF_MAX] = {
+	[E_PLATF_INVAL]			= E_CHIP_INVAL,
+	[E_PLATF_E16_7Z020_GPIO]	= E_CHIP_E16G301,
+	[E_PLATF_E16_7Z020_NO_GPIO]	= E_CHIP_E16G301,
+	[E_PLATF_E16_7Z010_GPIO]	= E_CHIP_E16G301,
+	[E_PLATF_E16_7Z010_NO_GPIO]	= E_CHIP_E16G301,
+	[E_PLATF_E64_7Z020_GPIO]	= E_CHIP_E64G401
+};
+
 static const struct {
 	char *name;
 	enum e_chip_type type;
@@ -94,6 +120,9 @@ struct elink {
 	u16 coreid_pinout; /* core id pinout */
 
 	struct connection *connection;
+
+	union e_syscfg_version version;
+	enum e_chip_type chip_type;
 };
 
 struct connection {
@@ -324,6 +353,32 @@ put_u:
 	return retval;
 }
 
+static int probe_elink(struct epiphany_device *epiphany, struct elink *elink)
+{
+	struct platform_device *pdev = epiphany->pdev;
+	struct device *dev = &pdev->dev;
+	union e_syscfg_version version;
+
+	version.reg = reg_read(elink->regs, E_SYS_VERSION);
+
+	if (!version.generation || version.generation >= E_GEN_MAX) {
+		dev_info(dev, "elink: unsupported generation: 0x%x.\n",
+			 version.generation);
+		return -EINVAL;
+	}
+
+	if (!version.platform || version.platform >= E_PLATF_MAX) {
+		dev_info(dev, "elink: unsupported platform: 0x%x.\n",
+			 version.platform);
+		return -EINVAL;
+	}
+
+	elink->version = version;
+	elink->chip_type = elink_platform_chip_match[version.platform];
+
+	return 0;
+}
+
 static int dt_probe_elink_clks(struct epiphany_device *epiphany,
 			       struct elink *elink)
 {
@@ -426,7 +481,11 @@ static int dt_probe_elinks(struct epiphany_device *epiphany)
 			break;
 		}
 
-		/* elink->type = probe_elink(epiphany, elink) */
+		err = probe_elink(epiphany, elink);
+		if (err) {
+			retval = err;
+			break;
+		}
 
 		list_for_each_entry(connection, &epiphany->connection_list,
 				    list) {
