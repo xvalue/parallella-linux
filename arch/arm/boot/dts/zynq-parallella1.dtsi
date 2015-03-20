@@ -322,3 +322,14 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_usb1_default>;
 };
+
+&adc {
+	xlnx,channels {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		channel@0 {
+			#io-channel-cells = <0>;
+			reg = <0>;
+		};
+	};
+};
