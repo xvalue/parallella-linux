@@ -523,36 +523,6 @@ config VEXPRESS_SYSCFG
 	  bus. System Configuration interface is one of the possible means
 	  of generating transactions on this bus.
 
-config XILINX_TRAFGEN
-	tristate "Xilinx Traffic Generator"
-	depends on MICROBLAZE || ARCH_ZYNQ
-	help
-	  This option enables support for the Xilinx Traffic Generator driver.
-	  It is designed to generate AXI4 traffic which can be used to stress
-	  different modules/interconnect connected in the system. Different
-	  configurable options which are provided through sysfs entries allow
-	  allow the user to generate a wide variety of traffic based on their
-	  their requirements.
-
-	  If unsure, say N
-
-config XILINX_JESD204B
-	tristate "Xilinx JESD204B"
-	depends on MICROBLAZE
-	help
-	  This option enables support for the Xilinx JESD204B driver.
-	  It is designed to allow user to access JESD204B IP registers
-	  with sysfs entries. JESD204B is the protocol used by High-Speed
-	  data converters to transfer data to FPGA/ASIC.
-
-	  If unsure, say N
-
-config EPIPHANY
-	tristate "Adapteva Epiphany driver"
-	default n
-	help
-	  Epiphany...
-
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"
