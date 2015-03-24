@@ -14,6 +14,7 @@
 #include <linux/uaccess.h>
 #include <linux/mutex.h>
 #include <linux/regulator/consumer.h>
+#include <linux/slab.h>
 
 #include "epiphany.h"
 
@@ -214,6 +215,23 @@ static inline struct epiphany_device *to_epiphany_device(struct file *file)
 	return container_of(file->private_data, struct epiphany_device, misc);
 }
 
+static struct elink *get_adjacent_elink(struct connection *edge, void *w)
+{
+	if (w == edge->u) {
+		if (!edge->v_is_host_bridge)
+			return NULL;
+		return (struct elink *) edge->v;
+	}
+	if (w == edge->v) {
+		if (!edge->u_is_host_bridge)
+			return NULL;
+		return (struct elink *) edge->u;
+	}
+
+	WARN_ON(w != edge->u && w != edge->v);
+	return NULL;
+}
+
 static struct chip_array *get_adjacent_chip_array(struct connection *edge,
 						  void *w, u16 *rel_coreid)
 {
@@ -247,6 +265,18 @@ static u16 get_adjacent_abs_coreid(struct connection *edge, void *w)
 		return 0;
 
 	return (array->id + rel_coreid);
+}
+
+static u16 get_rel_coreid(struct connection *edge, void *w)
+{
+	if (w == edge->u)
+		return edge->u_rel_coreid;
+
+	if (w == edge->v)
+		return edge->v_rel_coreid;
+
+	WARN_ON(w != edge->u && w != edge->v);
+	return 0;
 }
 
 static u32 get_adjacent_linkreg_ctrlmode(struct connection *edge, void *w)
@@ -293,6 +323,149 @@ static int coreid_to_phys(struct epiphany_device *epiphany, u16 coreid,
 	*out = phys;
 
 	return 0;
+}
+
+static void array_disable_disconnected_elinks(struct epiphany_device *epiphany,
+					      struct chip_array *array)
+{
+	int err, i, nlinks;
+	int arr_chip_row, arr_chip_col, chip_row, chip_col;
+	const struct epiphany_chip_info *cinfo =
+		&epiphany_chip_info[array->chip_type];
+	phys_addr_t core_phys, regs_phys;
+	u16 coreid, link, chip_coreid;
+	void __iomem *regs;
+	struct connection **conn;
+	bool *connected;
+	union e_syscfg_tx txcfg;
+	u32 ctrlmode;
+	struct elink *elink;
+	enum elink_side side;
+	u32 disable = 0xfff; /* See data sheet */
+
+	/* TODO: Keep things real simple for now. Only shut down unused array
+	 * e-links if there is one chip in the array. With more chips things
+	 * become more complicated since then we must also take into account
+	 * i)  from which host e-link the access will enter the mesh, and
+	 * ii) if the message can be routed to its destination with a
+	 * non-default ctrlmode. */
+	if (array->chip_rows > 1 || array->chip_cols > 1) {
+		dev_dbg(&epiphany->pdev->dev,
+			"More than one chip in array 0x%x. Will NOT disable unused elinks (driver limitation).\n",
+			array->id);
+		return;
+	}
+
+	/* Assume e-links can only be on outside edges of array and that there
+	 * is exactly one e-link connection per side per chip. This is the
+	 * case for all current chips. */
+	nlinks = (array->chip_rows + array->chip_cols) * 2;
+	connected = kcalloc(nlinks, sizeof(bool), GFP_KERNEL);
+
+	for (conn = &array->connections[0]; *conn; conn++) {
+		link = get_rel_coreid(*conn, array);
+		coreid = array->id + link;
+		/* Chip coords inside array */
+		arr_chip_row = ROW(link) / cinfo->rows;
+		arr_chip_col = COL(link) / cinfo->cols;
+		/* Core coords inside chip */
+		chip_row = ROW(link) % cinfo->rows;
+		chip_col = COL(link) % cinfo->cols;
+		chip_coreid = COORDS(chip_row, chip_col);
+
+		/* Rows first, then cols. That is: north, south, west, east. */
+		if (chip_row == 0)
+			connected[arr_chip_col] = true;
+		else if (chip_row == cinfo->rows - 1)
+			connected[array->chip_cols + arr_chip_col] = true;
+		else if (chip_col == 0)
+			connected[2 * array->chip_cols + arr_chip_row] = true;
+		else if (chip_col == cinfo->cols - 1)
+			connected[2 * array->chip_cols +
+				    array->chip_rows + arr_chip_row] = true;
+		else
+			WARN_ON(true);
+	}
+
+	for (i = 0; i < nlinks; i++) {
+		if (connected[i])
+			continue;
+
+		if (i < array->chip_cols) {
+			/* North row */
+			arr_chip_row = 0;
+			arr_chip_col = i;
+			side = E_SIDE_N;
+		} else if (i < 2 * array->chip_cols) {
+			/* South row */
+			arr_chip_row = array->chip_rows - 1;
+			arr_chip_col = i - array->chip_cols;
+			side = E_SIDE_S;
+		} else if (i < 2 * array->chip_cols + array->chip_rows) {
+			/* West col */
+			arr_chip_row = i - 2 * array->chip_cols;
+			arr_chip_col = 0;
+			side = E_SIDE_W;
+		} else {
+			/* East col */
+			arr_chip_row =
+				i - (2 * array->chip_cols + array->chip_rows);
+			arr_chip_col = array->chip_cols - 1;
+			side = E_CTRLMODE_EAST;
+		}
+
+		ctrlmode = ctrlmode_hints[side];
+		coreid = array->id +				/* array  */
+			 COORDS(cinfo->rows * arr_chip_row,	/* chip   */
+				cinfo->cols * arr_chip_col) +
+			 cinfo->elink_coreid[side];		/* e-link */
+
+		dev_dbg(&epiphany->pdev->dev,
+			"Disabling elink 0x%x (%u, %u) in array 0x%x.\n",
+			coreid, ROW(coreid), COL(coreid), array->id);
+
+		err = coreid_to_phys(epiphany, coreid, &core_phys);
+		WARN_ON(err);
+		if (err)
+			continue;
+
+		regs_phys = (core_phys | E_REG_BASE) & PAGE_MASK;
+		regs = ioremap_nocache(regs_phys, PAGE_SIZE);
+		WARN_ON(!regs);
+		if (!regs)
+			continue;
+
+		/* Suboptimal, but works. We have not yet implemented a way to
+		 * figure out which host elink bridge the bus access will go
+		 * through. Instead, set ctrlmode for all host elinks connected
+		 * to the array, instead of the just one. */
+		for (conn = &array->connections[0]; *conn; conn++) {
+			elink = get_adjacent_elink(*conn, array);
+			if (!elink)
+				continue;
+
+			txcfg.reg = reg_read(elink->regs, E_SYS_CFGTX);
+			txcfg.ctrlmode = ctrlmode;
+			reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
+		}
+
+		reg_write(disable, regs, E_REG_LINKTXCFG & ~PAGE_MASK);
+		reg_write(disable, regs, E_REG_LINKRXCFG & ~PAGE_MASK);
+
+		/* Reset ctrlmode to normal */
+		for (conn = &array->connections[0]; *conn; conn++) {
+			elink = get_adjacent_elink(*conn, array);
+			if (!elink)
+				continue;
+
+			txcfg.reg = reg_read(elink->regs, E_SYS_CFGTX);
+			txcfg.ctrlmode = 0;
+			reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
+		}
+		iounmap(regs);
+	}
+
+	kfree(connected);
 }
 
 static void array_enable_clock_gating(struct epiphany_device *epiphany,
@@ -495,8 +668,10 @@ static int epiphany_char_open(struct inode *inode, struct file *file)
 			reset_elink(epiphany, elink);
 		}
 
-		list_for_each_entry(array, &epiphany->chip_array_list, list)
+		list_for_each_entry(array, &epiphany->chip_array_list, list) {
 			array_enable_clock_gating(epiphany, array);
+			array_disable_disconnected_elinks(epiphany, array);
+		}
 	}
 
 	epiphany->u_count++;
