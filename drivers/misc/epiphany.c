@@ -844,6 +844,7 @@ static long epiphany_char_ioctl(struct file *file, unsigned int cmd,
 				unsigned long arg)
 {
 	int err = 0;
+	struct epiphany_device *epiphany = to_epiphany_device(file);
 
 	if (_IOC_TYPE(cmd) != EPIPHANY_IOC_MAGIC)
 		return -ENOTTY;
@@ -866,6 +867,20 @@ static long epiphany_char_ioctl(struct file *file, unsigned int cmd,
 		return -EFAULT;
 
 	switch (cmd) {
+	case EPIPHANY_IOC_RESET:
+		/* This is unsafe since another thread might be accessing the
+		 * emesh concurrently. Either we need to suspend all tasks that
+		 * have the device open or perhaps we can do it with a fault
+		 * handler ? */
+		if (mutex_lock_interruptible(&driver_lock))
+			return -ERESTARTSYS;
+		err = epiphany_reset(epiphany);
+		mutex_unlock(&driver_lock);
+
+		if (err)
+			return err;
+
+		break;
 	default:
 		return -ENOTTY;
 	}
