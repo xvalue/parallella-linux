@@ -295,6 +295,45 @@ static int coreid_to_phys(struct epiphany_device *epiphany, u16 coreid,
 	return 0;
 }
 
+static void array_enable_clock_gating(struct epiphany_device *epiphany,
+				      struct chip_array *array)
+{
+	int err, i, j, row0, col0, last_row, last_col;
+	const struct epiphany_chip_info *cinfo =
+		&epiphany_chip_info[array->chip_type];
+	phys_addr_t core, paddr;
+	void __iomem *core_mem;
+	u32 config, meshconfig;
+
+	row0 = ROW(array->id);
+	col0 = COL(array->id);
+	last_row = row0 + array->chip_rows * cinfo->rows;
+	last_col = col0 + array->chip_cols * cinfo->cols;
+
+	for (i = row0; i < last_row; i++) {
+		for (j = col0; j < last_col; j++) {
+			err = coreid_to_phys(epiphany, COORDS(i, j), &core);
+			WARN_ON(err);
+			if (err)
+				continue;
+
+			paddr = (core | E_REG_BASE) & PAGE_MASK;
+			core_mem = ioremap_nocache(paddr, PAGE_SIZE);
+			WARN_ON(!core_mem);
+			if (!core_mem)
+				continue;
+
+			config = E_REG_CONFIG & ~(PAGE_MASK);
+			reg_write(0x00400000, core_mem, config);
+
+			meshconfig = E_REG_MESHCONFIG & ~(PAGE_MASK);
+			reg_write(0x00000002, core_mem, meshconfig);
+
+			iounmap(core_mem);
+		}
+	}
+}
+
 static int configure_adjacent_link(struct epiphany_device *epiphany,
 				   struct elink *elink)
 {
@@ -455,6 +494,9 @@ static int epiphany_char_open(struct inode *inode, struct file *file)
 		list_for_each_entry(elink, &epiphany->elink_list, list) {
 			reset_elink(epiphany, elink);
 		}
+
+		list_for_each_entry(array, &epiphany->chip_array_list, list)
+			array_enable_clock_gating(epiphany, array);
 	}
 
 	epiphany->u_count++;

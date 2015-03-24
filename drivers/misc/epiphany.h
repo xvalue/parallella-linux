@@ -40,6 +40,12 @@ enum e_ctrlmode {
 	E_CTRLMODE_WEST		= 13
 };
 
+enum e_core_reg {
+	E_REG_BASE		= 0xf0000,
+	E_REG_CONFIG		= 0xf0400,
+	E_REG_MESHCONFIG	= 0xf0700
+};
+
 union e_syscfg_tx {
 	u32 reg;
 	struct {
