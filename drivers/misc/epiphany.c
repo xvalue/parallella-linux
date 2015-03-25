@@ -205,8 +205,68 @@ static int epiphany_char_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+static int epiphany_map_memory(struct vm_area_struct *vma, bool device_mem)
+{
+	int err;
+
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+
+	if (device_mem) {
+		err = io_remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff,
+					 vma->vm_end - vma->vm_start,
+					 vma->vm_page_prot);
+	} else {
+		err = remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff,
+				      vma->vm_end - vma->vm_start,
+				      vma->vm_page_prot);
+	}
+
+	if (err) {
+		pr_err("Failed mapping memory to vma 0x%08lx, size 0x%08lx, page offset 0x%08lx\n",
+		       vma->vm_start, vma->vm_end - vma->vm_start,
+		       vma->vm_pgoff);
+	}
+
+	return err;
+}
+
+static const struct vm_operations_struct mmap_mem_ops = {
+#ifdef CONFIG_HAVE_IOREMAP_PROT
+	.access = generic_access_phys
+#endif
+};
+
 static int epiphany_char_mmap(struct file *file, struct vm_area_struct *vma)
 {
+	unsigned long off = vma->vm_pgoff << PAGE_SHIFT;
+	unsigned long size = vma->vm_end - vma->vm_start;
+	struct epiphany_device *epiphany = to_epiphany_device(file);
+	struct elink *elink;
+	struct mem_region *region;
+
+	vma->vm_ops = &mmap_mem_ops;
+
+	if (epiphany->emesh_start <= off &&
+	    off + size <= epiphany->emesh_start + epiphany->emesh_size)
+		return epiphany_map_memory(vma, true);
+
+	/* TODO: Should only be allowed if param_unsafe is set */
+	list_for_each_entry(elink, &epiphany->elink_list, list) {
+		if (elink->regs_start <= off &&
+		    off + size <= elink->regs_start + elink->regs_size)
+			return epiphany_map_memory(vma, true);
+	}
+
+	list_for_each_entry(region, &epiphany->mem_region_list, list) {
+		if (region->start <= off &&
+		    off + size <= region->start + region->size)
+			return epiphany_map_memory(vma, false);
+	}
+
+	dev_dbg(&epiphany->pdev->dev,
+		"epiphany_mmap - invalid request to map 0x%08lx, length 0x%08lx bytes\n",
+		off, size);
+
 	return -EINVAL;
 }
 
