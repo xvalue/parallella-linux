@@ -13,6 +13,7 @@
 #include <linux/miscdevice.h>
 #include <linux/uaccess.h>
 #include <linux/mutex.h>
+#include <linux/regulator/consumer.h>
 
 #include "epiphany.h"
 
@@ -153,6 +154,8 @@ struct chip_array {
 	unsigned int chip_cols;
 	enum e_chip_type chip_type;
 	struct connection **connections;
+
+	struct regulator *supply;
 };
 
 struct mem_region {
@@ -202,7 +205,9 @@ static inline struct epiphany_device *to_epiphany_device(struct file *file)
 
 static int epiphany_char_open(struct inode *inode, struct file *file)
 {
+	int retval = 0;
 	struct epiphany_device *epiphany;
+	struct chip_array *array;
 
 	epiphany = to_epiphany_device(file);
 
@@ -212,18 +217,29 @@ static int epiphany_char_open(struct inode *inode, struct file *file)
 	if (!epiphany->u_count) {
 		/* if !epiphany->param_no_reset (or no power mgmt) */
 		/* reset_system(epiphany) */
+
+		list_for_each_entry(array, &epiphany->chip_array_list, list) {
+			if (array->supply)
+				if (regulator_enable(array->supply)) {
+					/* Not much else we can do? */
+					retval = -EIO;
+					goto mtx_unlock;
+				}
+		}
 	}
 
 	epiphany->u_count++;
 
+mtx_unlock:
 	mutex_unlock(&driver_lock);
 
-	return 0;
+	return retval;
 }
 
 static int epiphany_char_release(struct inode *inode, struct file *file)
 {
 	struct epiphany_device *epiphany;
+	struct chip_array *array;
 
 	epiphany = to_epiphany_device(file);
 
@@ -234,7 +250,11 @@ static int epiphany_char_release(struct inode *inode, struct file *file)
 
 	if (!epiphany->u_count) {
 		/* if (!epiphany->param_no_powersave) */
-		/* shutdown system */
+		list_for_each_entry(array, &epiphany->chip_array_list, list) {
+			if (array->supply)
+				regulator_disable(array->supply);
+		}
+
 		dev_dbg(&epiphany->pdev->dev, "no users\n");
 	}
 
@@ -614,16 +634,17 @@ static int dt_probe_chip_arrays(struct epiphany_device *epiphany)
 {
 	struct platform_device *pdev = epiphany->pdev;
 	struct device *dev = &pdev->dev;
-	struct device_node *np, *emesh;
+	struct device_node *np, *emesh, *supply_node;
 	struct chip_array *array;
 	struct connection *connection;
 	struct connection **conn;
+	struct regulator *supply;
 	u32 reg[3];
 	int nconns = 0;
 	int err;
 	int i;
 	int retval = 0; /* Allow 0 arrays - hot-plugging */
-	const char *model;
+	const char *model, *supply_name;
 
 	emesh = of_get_child_by_name(dev->of_node, "epiphany-mesh");
 	if (!emesh) {
@@ -688,6 +709,41 @@ static int dt_probe_chip_arrays(struct epiphany_device *epiphany)
 			retval = err;
 			break;
 		}
+
+		/* TODO: Support more than one regulator per array */
+		supply_node = of_parse_phandle(np, "ecore-supply", 0);
+		if (!supply_node) {
+			dev_warn(dev, "arrays: no supply node specified, no power management.\n");
+			goto no_supply_node;
+		}
+
+		err = of_property_read_string(supply_node, "regulator-name",
+					      &supply_name);
+		if (err) {
+			dev_info(dev, "arrays: no regulator name\n");
+			retval = -ENOENT;
+			break;
+		}
+
+		supply = devm_regulator_get(dev, supply_name);
+		if (IS_ERR(supply)) {
+			if (PTR_ERR(supply) == -EPROBE_DEFER) {
+				dev_info(dev,
+					 "arrays: %s regulator not ready, retry\n",
+					 np->name);
+			} else {
+				dev_info(dev,
+					 "arrays: no regulator %s: %ld\n",
+					 np->name, PTR_ERR(supply));
+			}
+
+			retval = PTR_ERR(supply);
+			break;
+		}
+
+		array->supply = supply;
+
+no_supply_node:
 
 		conn = &array->connections[0];
 		list_for_each_entry(connection, &epiphany->connection_list,
