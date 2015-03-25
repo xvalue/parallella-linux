@@ -295,20 +295,71 @@ static int coreid_to_phys(struct epiphany_device *epiphany, u16 coreid,
 	return 0;
 }
 
-/* Reset the Epiphany platform */
-static int reset_elink(struct epiphany_device *epiphany, struct elink *elink)
+static int configure_adjacent_link(struct epiphany_device *epiphany,
+				   struct elink *elink)
 {
-	int err, retval = 0;
 	struct device *dev = &epiphany->pdev->dev;
 	const struct epiphany_chip_info *cinfo;
-	union e_syscfg_tx txcfg = {0};
-	union e_syscfg_rx rxcfg = {0};
-	union e_syscfg_clk clkcfg = {0};
+	union e_syscfg_tx txcfg;
+	int err;
 	u32 offset;
 	u16 coreid;
 	phys_addr_t core, paddr;
 	void __iomem *core_mem;
 	struct chip_array *array;
+
+	array = get_adjacent_chip_array(elink->connection, elink, NULL);
+	if (!array)
+		return 0;
+
+	/* Figure out which divider we need for the TX reg */
+	cinfo = &epiphany_chip_info[array->chip_type];
+	if (!cinfo->linkcfg_tx_divider)
+		return 0;
+
+	dev_dbg(dev, "chip requires programming the link clock divider.\n");
+
+	txcfg.reg = reg_read(elink->regs, E_SYS_CFGTX);
+
+	txcfg.ctrlmode =
+		get_adjacent_linkreg_ctrlmode(elink->connection, elink);
+
+	/* Calculate and map address */
+	coreid = get_adjacent_abs_coreid(elink->connection, elink);
+
+	err = coreid_to_phys(epiphany, coreid, &core);
+	WARN_ON(err);
+	if (err)
+		return err;
+
+	paddr = (core | E_REG_LINKCFG) & PAGE_MASK;
+	offset = E_REG_LINKCFG & ~(PAGE_MASK);
+	core_mem = ioremap_nocache(paddr, PAGE_SIZE);
+	if (!core_mem) {
+		dev_warn(dev, "Mapping emesh address space failed.\n");
+		return -ENOMEM;
+	}
+
+	/* Write */
+	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
+
+	reg_write(cinfo->linkcfg_tx_divider, core_mem, offset);
+
+	txcfg.ctrlmode = 0;
+	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
+
+	iounmap(core_mem);
+
+	return 0;
+}
+
+/* Reset the Epiphany platform */
+static int reset_elink(struct epiphany_device *epiphany, struct elink *elink)
+{
+	int retval = 0;
+	union e_syscfg_tx txcfg = {0};
+	union e_syscfg_rx rxcfg = {0};
+	union e_syscfg_clk clkcfg = {0};
 
 	epiphany_sleep();
 
@@ -350,53 +401,10 @@ static int reset_elink(struct epiphany_device *epiphany, struct elink *elink)
 	rxcfg.enable = 1;
 	reg_write(rxcfg.reg, elink->regs, E_SYS_CFGRX);
 
-	array = get_adjacent_chip_array(elink->connection, elink, NULL);
-	if (array) {
-		/* Figure out which divider we need for the TX reg */
-		cinfo = &epiphany_chip_info[array->chip_type];
-		if (!cinfo->linkcfg_tx_divider)
-			goto out;
+	retval = configure_adjacent_link(epiphany, elink);
 
-		dev_dbg(dev,
-			"chip requires programming the link clock divider.\n");
-
-		txcfg.ctrlmode =
-			get_adjacent_linkreg_ctrlmode(elink->connection, elink);
-
-		/* Calculate and map address */
-		coreid = get_adjacent_abs_coreid(elink->connection, elink);
-
-		err = coreid_to_phys(epiphany, coreid, &core);
-		WARN_ON(err);
-		if (err) {
-			retval = err;
-			goto out;
-		}
-
-		paddr = (core | E_REG_LINKCFG) & PAGE_MASK;
-		offset = E_REG_LINKCFG & ~(PAGE_MASK);
-		core_mem = ioremap_nocache(paddr, PAGE_SIZE);
-		if (!core_mem) {
-			dev_warn(dev, "Mapping emesh address space failed.\n");
-			retval = -ENOMEM;
-			goto out;
-		}
-
-		/* Write */
-		reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
-
-		reg_write(cinfo->linkcfg_tx_divider, core_mem, offset);
-
-		txcfg.ctrlmode = 0;
-		reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
-
-		iounmap(core_mem);
-	}
-
-out:
 	epiphany_sleep();
 	return retval;
-
 }
 
 static int epiphany_char_open(struct inode *inode, struct file *file)
