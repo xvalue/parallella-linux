@@ -58,6 +58,8 @@ struct epiphany_chip_info {
 	int cols;
 	size_t core_mem;
 	u16 elink_coreid[E_SIDE_MAX]; /* relative */
+
+	u32 linkcfg_tx_divider;
 };
 static const struct epiphany_chip_info epiphany_chip_info[E_CHIP_MAX] = {
 	[E_CHIP_E16G301] = {
@@ -68,7 +70,9 @@ static const struct epiphany_chip_info epiphany_chip_info[E_CHIP_MAX] = {
 		.elink_coreid[E_SIDE_N] = COORDS(0, 2),
 		.elink_coreid[E_SIDE_E] = COORDS(2, 3),
 		.elink_coreid[E_SIDE_S] = COORDS(3, 2),
-		.elink_coreid[E_SIDE_W] = COORDS(2, 0)
+		.elink_coreid[E_SIDE_W] = COORDS(2, 0),
+
+		.linkcfg_tx_divider = 1
 	},
 	[E_CHIP_E64G401] = {
 		.rows = 8,
@@ -78,7 +82,10 @@ static const struct epiphany_chip_info epiphany_chip_info[E_CHIP_MAX] = {
 		.elink_coreid[E_SIDE_N] = COORDS(0, 2),
 		.elink_coreid[E_SIDE_E] = COORDS(2, 7),
 		.elink_coreid[E_SIDE_S] = COORDS(7, 2),
-		.elink_coreid[E_SIDE_W] = COORDS(2, 0)
+		.elink_coreid[E_SIDE_W] = COORDS(2, 0),
+
+		/* TODO: Verify */
+		.linkcfg_tx_divider = 0
 	}
 };
 
@@ -293,11 +300,10 @@ static int reset_elink(struct epiphany_device *epiphany, struct elink *elink)
 {
 	int err, retval = 0;
 	struct device *dev = &epiphany->pdev->dev;
-	unsigned int divider;
+	const struct epiphany_chip_info *cinfo;
 	union e_syscfg_tx txcfg = {0};
 	union e_syscfg_rx rxcfg = {0};
 	union e_syscfg_clk clkcfg = {0};
-	bool need_div_elink_tx;
 	u32 offset;
 	u16 coreid;
 	phys_addr_t core, paddr;
@@ -346,6 +352,18 @@ static int reset_elink(struct epiphany_device *epiphany, struct elink *elink)
 
 	array = get_adjacent_chip_array(elink->connection, elink, NULL);
 	if (array) {
+		/* Figure out which divider we need for the TX reg */
+		cinfo = &epiphany_chip_info[array->chip_type];
+		if (!cinfo->linkcfg_tx_divider)
+			goto out;
+
+		dev_dbg(dev,
+			"chip requires programming the link clock divider.\n");
+
+		txcfg.ctrlmode =
+			get_adjacent_linkreg_ctrlmode(elink->connection, elink);
+
+		/* Calculate and map address */
 		coreid = get_adjacent_abs_coreid(elink->connection, elink);
 
 		err = coreid_to_phys(epiphany, coreid, &core);
@@ -353,20 +371,6 @@ static int reset_elink(struct epiphany_device *epiphany, struct elink *elink)
 		if (err) {
 			retval = err;
 			goto out;
-		}
-		offset = E_REG_LINKCFG;
-
-		txcfg.ctrlmode =
-			get_adjacent_linkreg_ctrlmode(elink->connection, elink);
-
-		/* TODO: Check core voltage (of all supplies). Assume it is
-		 * required for now. */
-		need_div_elink_tx = 1;
-		if (need_div_elink_tx) {
-			divider = 1; /* Divide by 4, see data sheet */
-			dev_dbg(dev, "found platform type that requires programming the link clock divider.\n");
-		} else {
-			divider = 0; /* Divide by 2 */
 		}
 
 		paddr = (core | E_REG_LINKCFG) & PAGE_MASK;
@@ -378,9 +382,10 @@ static int reset_elink(struct epiphany_device *epiphany, struct elink *elink)
 			goto out;
 		}
 
+		/* Write */
 		reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
 
-		reg_write(divider, core_mem, offset);
+		reg_write(cinfo->linkcfg_tx_divider, core_mem, offset);
 
 		txcfg.ctrlmode = 0;
 		reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
