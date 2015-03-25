@@ -60,6 +60,11 @@ struct epiphany_chip_info {
 	size_t core_mem;
 	u16 elink_coreid[E_SIDE_MAX]; /* relative */
 
+	/* In uVolts */
+	int vdd_default;
+	int vdd_min;
+	int vdd_max;
+
 	u32 linkcfg_tx_divider;
 };
 static const struct epiphany_chip_info epiphany_chip_info[E_CHIP_MAX] = {
@@ -73,6 +78,11 @@ static const struct epiphany_chip_info epiphany_chip_info[E_CHIP_MAX] = {
 		.elink_coreid[E_SIDE_S] = COORDS(3, 2),
 		.elink_coreid[E_SIDE_W] = COORDS(2, 0),
 
+		/* Recommended operating conditions */
+		.vdd_default	= 1000000,
+		.vdd_min	=  900000,
+		.vdd_max	= 1200000,
+
 		.linkcfg_tx_divider = 1
 	},
 	[E_CHIP_E64G401] = {
@@ -84,6 +94,11 @@ static const struct epiphany_chip_info epiphany_chip_info[E_CHIP_MAX] = {
 		.elink_coreid[E_SIDE_E] = COORDS(2, 7),
 		.elink_coreid[E_SIDE_S] = COORDS(7, 2),
 		.elink_coreid[E_SIDE_W] = COORDS(2, 0),
+
+		/* Recommended operating conditions */
+		.vdd_default	= 1000000,
+		.vdd_min	=  900000,
+		.vdd_max	= 1100000,
 
 		/* TODO: Verify */
 		.linkcfg_tx_divider = 0
@@ -640,6 +655,33 @@ static void disable_elink(struct elink *elink)
 	epiphany_sleep();
 }
 
+static int epiphany_regulator_enable(struct chip_array *array)
+{
+	int err, curr_vdd;
+	bool safe;
+	const struct epiphany_chip_info *cinfo =
+		&epiphany_chip_info[array->chip_type];
+
+	if (!array->supply)
+		return 0;
+
+	curr_vdd = regulator_get_voltage(array->supply);
+
+	safe = cinfo->vdd_min <= curr_vdd && curr_vdd <= cinfo->vdd_max;
+	if (!safe) {
+		err = regulator_set_voltage(array->supply, cinfo->vdd_default,
+					    cinfo->vdd_max);
+		if (err)
+			return err;
+	}
+
+	err = regulator_enable(array->supply);
+	if (err)
+		return err;
+
+	return 0;
+}
+
 static int epiphany_reset(struct epiphany_device *epiphany)
 {
 	struct chip_array *array;
@@ -651,12 +693,11 @@ static int epiphany_reset(struct epiphany_device *epiphany)
 	 * regulator's refcount */
 	if (!epiphany->u_count) {
 		list_for_each_entry(array, &epiphany->chip_array_list, list) {
-			if (array->supply)
-				if (regulator_enable(array->supply)) {
-					/* Not much else we can do? */
-					retval = -EIO;
-					goto out;
-				}
+			if (epiphany_regulator_enable(array)) {
+				/* Not much else we can do? */
+				retval = -EIO;
+				goto out;
+			}
 		}
 	}
 
