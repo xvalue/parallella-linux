@@ -640,12 +640,47 @@ static void disable_elink(struct elink *elink)
 	epiphany_sleep();
 }
 
-static int epiphany_char_open(struct inode *inode, struct file *file)
+static int epiphany_reset(struct epiphany_device *epiphany)
 {
-	int retval = 0;
-	struct epiphany_device *epiphany;
 	struct chip_array *array;
 	struct elink *elink;
+	int err, retval = 0;
+
+	/* Unsafe to manipulate power if already in use. At any rate we should
+	 * not call regulator_enable() again since that would screw up the
+	 * regulator's refcount */
+	if (!epiphany->u_count) {
+		list_for_each_entry(array, &epiphany->chip_array_list, list) {
+			if (array->supply)
+				if (regulator_enable(array->supply)) {
+					/* Not much else we can do? */
+					retval = -EIO;
+					goto out;
+				}
+		}
+	}
+
+	list_for_each_entry(elink, &epiphany->elink_list, list) {
+		err = reset_elink(epiphany, elink);
+		if (err) {
+			retval = -EIO;
+			goto out;
+		}
+	}
+
+	list_for_each_entry(array, &epiphany->chip_array_list, list) {
+		array_enable_clock_gating(epiphany, array);
+		array_disable_disconnected_elinks(epiphany, array);
+	}
+
+out:
+	return retval;
+}
+
+static int epiphany_char_open(struct inode *inode, struct file *file)
+{
+	int err, retval = 0;
+	struct epiphany_device *epiphany;
 
 	epiphany = to_epiphany_device(file);
 
@@ -654,23 +689,10 @@ static int epiphany_char_open(struct inode *inode, struct file *file)
 
 	if (!epiphany->u_count) {
 		/* if !epiphany->param_no_reset (or no power mgmt) */
-
-		list_for_each_entry(array, &epiphany->chip_array_list, list) {
-			if (array->supply)
-				if (regulator_enable(array->supply)) {
-					/* Not much else we can do? */
-					retval = -EIO;
-					goto mtx_unlock;
-				}
-		}
-
-		list_for_each_entry(elink, &epiphany->elink_list, list) {
-			reset_elink(epiphany, elink);
-		}
-
-		list_for_each_entry(array, &epiphany->chip_array_list, list) {
-			array_enable_clock_gating(epiphany, array);
-			array_disable_disconnected_elinks(epiphany, array);
+		err = epiphany_reset(epiphany);
+		if (err) {
+			retval = err;
+			goto mtx_unlock;
 		}
 	}
 
