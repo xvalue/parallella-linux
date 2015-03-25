@@ -3,6 +3,7 @@
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/clk.h>
 #include <linux/ioctl.h>
 #include <linux/fs.h>
 #include <linux/delay.h>
@@ -88,6 +89,7 @@ struct elink {
 	void __iomem *regs;
 	phys_addr_t regs_start;
 	size_t regs_size;
+	struct clk **clocks;
 
 	u16 coreid_pinout; /* core id pinout */
 
@@ -322,6 +324,41 @@ put_u:
 	return retval;
 }
 
+static int dt_probe_elink_clks(struct epiphany_device *epiphany,
+			       struct elink *elink)
+{
+	struct device *dev = &epiphany->pdev->dev;
+	int retval = 0, i = 0;
+
+	static const char const *names[] = {
+		"fclk0", "fclk1", "fclk2", "fclk3"
+	};
+
+	elink->clocks = devm_kcalloc(dev, ARRAY_SIZE(names) + 1,
+				     sizeof(struct clock *), GFP_KERNEL);
+	if (!elink->clocks)
+		return -ENOMEM;
+
+	for (i = 0; i < ARRAY_SIZE(names); i++) {
+		elink->clocks[i] = devm_clk_get(dev, names[i]);
+		if (IS_ERR(elink->clocks[i])) {
+			retval = PTR_ERR(elink->clocks[i]);
+			elink->clocks[i] = NULL;
+			break;
+		}
+
+		retval = clk_prepare_enable(elink->clocks[i]);
+		if (retval) {
+			elink->clocks[i] = NULL;
+			break;
+		}
+
+		dev_dbg(dev, "Added clock: %s\n", names[i]);
+	}
+
+	return retval;
+}
+
 static int dt_probe_elinks(struct epiphany_device *epiphany)
 {
 	struct platform_device *pdev = epiphany->pdev;
@@ -370,6 +407,13 @@ static int dt_probe_elinks(struct epiphany_device *epiphany)
 		if (!elink->regs) {
 			dev_warn(dev, "elinks: Mapping eLink registers failed.\n");
 			retval = -ENOMEM;
+			break;
+		}
+
+		err = dt_probe_elink_clks(epiphany, elink);
+		if (err) {
+			dev_warn(dev, "elinks: Could not get clocks\n");
+			retval = err;
 			break;
 		}
 
@@ -567,8 +611,18 @@ static int dt_probe(struct epiphany_device *epiphany)
 
 static void epiphany_cleanup(struct epiphany_device *epiphany)
 {
+	struct elink *elink;
+	struct clk **clk;
+
 	if (epiphany->misc_registered)
 		misc_deregister(&epiphany->misc);
+
+	list_for_each_entry(elink, &epiphany->elink_list, list) {
+		if (!elink->clocks)
+			continue;
+		for (clk = &elink->clocks[0]; *clk; clk++)
+			clk_disable_unprepare(*clk);
+	}
 
 	/* Everything else is allocated with devm_* */
 }
