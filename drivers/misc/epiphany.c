@@ -20,9 +20,6 @@
 
 #define DRIVERNAME	"epiphany"
 
-#define MAX_ELINK_BRIDGES	256
-#define MAX_CONNECTIONS		1024
-
 #define COREID_SHIFT 20
 
 /* Be careful, no range check */
@@ -38,6 +35,13 @@ enum elink_side {
 	E_SIDE_S,
 	E_SIDE_W,
 	E_SIDE_MAX
+};
+
+enum connection_type {
+	E_CONN_DISCONNECTED = 0,
+	E_CONN_ELINK,
+	E_CONN_ARRAY,
+	E_CONN_MAX
 };
 
 enum e_chip_type {
@@ -130,65 +134,70 @@ static const enum e_chip_type elink_platform_chip_match[E_PLATF_MAX] = {
 	[E_PLATF_E64_7Z020_GPIO]	= E_CHIP_E64G401
 };
 
-static const struct {
-	char *name;
-	enum e_chip_type type;
-} epiphany_chip_of_match[] = {
-	{ "epiphany3", E_CHIP_E16G301 },
-	{ "epiphany4", E_CHIP_E64G401 }
+struct connection {
+	enum connection_type type; /* remote type */
+	enum elink_side side; /* remote side */
+	union {
+		struct elink *elink;
+		struct chip_array *array;
+	};
+
+	phandle phandle;
 };
 
 struct elink {
-	phandle phandle;
 	struct list_head list;
+
+	struct epiphany_device *epiphany;
 
 	void __iomem *regs;
 	phys_addr_t regs_start;
 	size_t regs_size;
+
+	/* TODO: Rename */
+	/* Host --> emesh bus address range */
+	phys_addr_t emesh_start;
+	size_t emesh_size;
+
 	struct clk **clocks;
 
-	u16 coreid_pinout; /* core id pinout */
-
-	struct connection *connection;
+	s16 coreid_pinout; /* core id pinout */
+	bool quirk_coreid_is_noop;
 
 	union e_syscfg_version version;
 	enum e_chip_type chip_type;
-};
 
-struct connection {
-	struct list_head list;
+	struct connection connection;
 
-	void *u;
-	bool u_is_host_bridge;
-	u32 u_rel_coreid;
+	/* TODO: Have our own cdev */
+	struct miscdevice misc;
+	bool misc_registered;
 
-	void *v;
-	bool v_is_host_bridge;
-	u32 v_rel_coreid;
-
-	/* Helpers for parsing device tree */
-	phandle u_phandle;
-	phandle v_phandle;
+	phandle phandle;
 };
 
 struct chip_array {
-	phandle phandle;
 	struct list_head list;
 
 	u16 id; /* north-west-most core */
 	unsigned int chip_rows;
 	unsigned int chip_cols;
 	enum e_chip_type chip_type;
-	struct connection **connections;
 
+	struct connection connections[E_SIDE_MAX];
+
+	/* TODO: Support more than one regulator */
 	struct regulator *supply;
+
+	phandle phandle;
 };
 
 struct mem_region {
-	phandle phandle;
 	struct list_head list;
 	phys_addr_t start;
 	size_t size;
+
+	phandle phandle;
 };
 
 struct epiphany_device {
@@ -196,27 +205,45 @@ struct epiphany_device {
 
 	struct platform_device *pdev;
 
-	void __iomem *emesh;
-	phys_addr_t emesh_start;
-	size_t emesh_size;
-
 	struct list_head elink_list;
-	struct list_head connection_list;
 	struct list_head mem_region_list;
 	struct list_head chip_array_list;
-
-	struct miscdevice misc;
-	bool misc_registered;
 };
 
+
+/* Any point suggesting these three for drivers/of/base.c ? */
+#define count_phandle_with_fixed_args(np, list_name, cell_count) \
+	of_parse_phandle_with_fixed_args(np, list_name, cell_count, -1, NULL)
+
+static inline struct device_node
+*get_next_compatible_child(struct device_node *parent,
+			   struct device_node *child,
+			   char *compatible)
+{
+	for (child = of_get_next_child(parent, child); child != NULL;
+	     child = of_get_next_child(parent, child)) {
+		if (of_device_is_compatible(child, compatible))
+			return child;
+	}
+	return NULL;
+}
+
+#define for_each_compatible_child(parent, dn, compat) \
+	for (dn = get_next_compatible_child(parent, NULL, compat); \
+	     dn != NULL; \
+	     dn = get_next_compatible_child(parent, dn, compat))
+
+/* TODO: Sledge-hammer approach. Needed on some Kickstarter boards. Ultimately
+ * these long sleeps should only be needed when modifying clocks. */
 static inline void epiphany_sleep(void)
 {
-	usleep_range(1000, 10000);
+	usleep_range(2000, 2100);
 }
 
 static inline void reg_write(u32 value, void __iomem *base, u32 offset)
 {
 	iowrite32(value, (u8 __iomem *)base + offset);
+	/* Sledge hammer fix. See comment for epiphany_sleep() */
 	epiphany_sleep();
 }
 
@@ -225,265 +252,149 @@ static inline u32 reg_read(void __iomem *base, u32 offset)
 	return ioread32((u8 __iomem *)base + offset);
 }
 
-static inline struct epiphany_device *to_epiphany_device(struct file *file)
+static inline struct elink *file_to_elink(struct file *file)
 {
-	return container_of(file->private_data, struct epiphany_device, misc);
+	return container_of(file->private_data, struct elink, misc);
 }
 
-static struct elink *get_adjacent_elink(struct connection *edge, void *w)
+static int coreid_to_phys(struct elink *elink, u16 coreid, phys_addr_t *out)
 {
-	if (w == edge->u) {
-		if (!edge->v_is_host_bridge)
-			return NULL;
-		return (struct elink *) edge->v;
-	}
-	if (w == edge->v) {
-		if (!edge->u_is_host_bridge)
-			return NULL;
-		return (struct elink *) edge->u;
-	}
-
-	WARN_ON(w != edge->u && w != edge->v);
-	return NULL;
-}
-
-static struct chip_array *get_adjacent_chip_array(struct connection *edge,
-						  void *w, u16 *rel_coreid)
-{
-	if (w == edge->u) {
-		if (edge->v_is_host_bridge)
-			return NULL;
-		if (rel_coreid)
-			*rel_coreid = edge->v_rel_coreid;
-		return (struct chip_array *) edge->v;
-	}
-	if (w == edge->v) {
-		if (edge->u_is_host_bridge)
-			return NULL;
-		if (rel_coreid)
-			*rel_coreid = edge->u_rel_coreid;
-		return (struct chip_array *) edge->u;
-	}
-
-	WARN_ON(w != edge->u && w != edge->v);
-	return NULL;
-}
-
-static u16 get_adjacent_abs_coreid(struct connection *edge, void *w)
-{
-	struct chip_array *array;
-	u16 rel_coreid;
-
-	array = get_adjacent_chip_array(edge, w, &rel_coreid);
-	WARN_ON(!array);
-	if (!array)
-		return 0;
-
-	return (array->id + rel_coreid);
-}
-
-static u16 get_rel_coreid(struct connection *edge, void *w)
-{
-	if (w == edge->u)
-		return edge->u_rel_coreid;
-
-	if (w == edge->v)
-		return edge->v_rel_coreid;
-
-	WARN_ON(w != edge->u && w != edge->v);
-	return 0;
-}
-
-static u32 get_adjacent_linkreg_ctrlmode(struct connection *edge, void *w)
-{
-	u16 arr_coreid, chip_coreid, arr_row, arr_col, chip_row, chip_col;
-	struct chip_array *array;
-	u32 ctrlmode = 0;
+	u32 rel_coreid, rel_row, rel_col;
+	struct chip_array *array = elink->connection.array;
 	const struct epiphany_chip_info *cinfo;
-	int i;
+	phys_addr_t offs;
 
-	array = get_adjacent_chip_array(edge, w, &arr_coreid);
-	WARN_ON(!array);
-	if (!array)
-		return 0;
+	if (elink->connection.type != E_CONN_ARRAY)
+		return -EINVAL;
 
-	cinfo = &epiphany_chip_info[array->chip_type];
-	arr_row = ROW(arr_coreid);
-	arr_col = COL(arr_coreid);
-	chip_row = arr_row % cinfo->rows;
-	chip_col = arr_col % cinfo->cols;
-	chip_coreid = COORDS(chip_row, chip_col);
-
-	for (i = 0; i < E_SIDE_MAX; i++) {
-		if (cinfo->elink_coreid[i] == chip_coreid) {
-			ctrlmode = ctrlmode_hints[i];
-			break;
-		}
-	}
-	WARN_ON(!ctrlmode);
-
-	return ctrlmode;
-}
-
-static int coreid_to_phys(struct epiphany_device *epiphany, u16 coreid,
-			  phys_addr_t *out)
-{
-	phys_addr_t phys =
-		((phys_addr_t) coreid) << ((phys_addr_t) COREID_SHIFT);
-
-	if (phys < epiphany->emesh_start ||
-	    phys - epiphany->emesh_start >= epiphany->emesh_size)
+	if (coreid < array->id)
 		return -ERANGE;
 
-	*out = phys;
+	cinfo = &epiphany_chip_info[array->chip_type];
+	rel_coreid = coreid - array->id;
+	rel_row = ROW(rel_coreid);
+	rel_col = COL(rel_coreid);
+
+	if (rel_row >= array->chip_rows * cinfo->rows)
+		return -ERANGE;
+
+	if (rel_col >= array->chip_cols * cinfo->cols)
+		return -ERANGE;
+
+	/* Offset from array start */
+	offs = ((phys_addr_t) rel_coreid) << ((phys_addr_t) COREID_SHIFT);
+
+	/* Adjust for offset from elink mem region (align by row) */
+	offs += ((phys_addr_t) COL(array->id)) << ((phys_addr_t) COREID_SHIFT);
+
+	if (offs >= elink->emesh_size)
+		return -ERANGE;
+
+	*out = offs + elink->emesh_start;
 
 	return 0;
 }
 
-static void array_disable_disconnected_elinks(struct epiphany_device *epiphany,
-					      struct chip_array *array)
+/* Disable chip elink */
+static void elink_disable_chip_elink(struct elink *elink,
+				     struct chip_array *array,
+				     u16 chipid,
+				     enum elink_side side)
 {
-	int err, i, nlinks;
-	int arr_chip_row, arr_chip_col, chip_row, chip_col;
+	int err;
 	const struct epiphany_chip_info *cinfo =
 		&epiphany_chip_info[array->chip_type];
 	phys_addr_t core_phys, regs_phys;
-	u16 coreid, link, chip_coreid;
+	u16 coreid;
 	void __iomem *regs;
-	struct connection **conn;
-	bool *connected;
 	union e_syscfg_tx txcfg;
-	u32 ctrlmode;
-	struct elink *elink;
-	enum elink_side side;
-	u32 disable = 0xfff; /* See data sheet */
 
-	/* TODO: Keep things real simple for now. Only shut down unused array
-	 * e-links if there is one chip in the array. With more chips things
-	 * become more complicated since then we must also take into account
-	 * i)  from which host e-link the access will enter the mesh, and
-	 * ii) if the message can be routed to its destination with a
-	 * non-default ctrlmode. */
-	if (array->chip_rows > 1 || array->chip_cols > 1) {
-		dev_dbg(&epiphany->pdev->dev,
-			"More than one chip in array 0x%x. Will NOT disable unused elinks (driver limitation).\n",
-			array->id);
+	coreid = chipid + cinfo->elink_coreid[side];
+
+	dev_dbg(&elink->epiphany->pdev->dev,
+		"Disabling elink 0x%03x (%02u, %02u) in array 0x%03x.\n",
+		coreid, ROW(coreid), COL(coreid), array->id);
+
+	err = coreid_to_phys(elink, coreid, &core_phys);
+	WARN_ON(err);
+	if (err)
 		return;
-	}
 
-	/* Assume e-links can only be on outside edges of array and that there
-	 * is exactly one e-link connection per side per chip. This is the
-	 * case for all current chips. */
-	nlinks = (array->chip_rows + array->chip_cols) * 2;
-	connected = kcalloc(nlinks, sizeof(bool), GFP_KERNEL);
+	regs_phys = (core_phys | E_REG_BASE) & PAGE_MASK;
+	regs = ioremap_nocache(regs_phys, PAGE_SIZE);
+	WARN_ON(!regs);
+	if (!regs)
+		return;
 
-	for (conn = &array->connections[0]; *conn; conn++) {
-		link = get_rel_coreid(*conn, array);
-		coreid = array->id + link;
-		/* Chip coords inside array */
-		arr_chip_row = ROW(link) / cinfo->rows;
-		arr_chip_col = COL(link) / cinfo->cols;
-		/* Core coords inside chip */
-		chip_row = ROW(link) % cinfo->rows;
-		chip_col = COL(link) % cinfo->cols;
-		chip_coreid = COORDS(chip_row, chip_col);
+	txcfg.reg = reg_read(elink->regs, E_SYS_CFGTX);
+	txcfg.ctrlmode = ctrlmode_hints[side];
+	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
 
-		/* Rows first, then cols. That is: north, south, west, east. */
-		if (chip_row == 0)
-			connected[arr_chip_col] = true;
-		else if (chip_row == cinfo->rows - 1)
-			connected[array->chip_cols + arr_chip_col] = true;
-		else if (chip_col == 0)
-			connected[2 * array->chip_cols + arr_chip_row] = true;
-		else if (chip_col == cinfo->cols - 1)
-			connected[2 * array->chip_cols +
-				    array->chip_rows + arr_chip_row] = true;
-		else
-			WARN_ON(true);
-	}
+	reg_write(0xfff, regs, E_REG_LINKTXCFG & ~PAGE_MASK);
+	reg_write(0xfff, regs, E_REG_LINKRXCFG & ~PAGE_MASK);
 
-	for (i = 0; i < nlinks; i++) {
-		if (connected[i])
-			continue;
+	txcfg.ctrlmode = 0;
+	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
 
-		if (i < array->chip_cols) {
-			/* North row */
-			arr_chip_row = 0;
-			arr_chip_col = i;
-			side = E_SIDE_N;
-		} else if (i < 2 * array->chip_cols) {
-			/* South row */
-			arr_chip_row = array->chip_rows - 1;
-			arr_chip_col = i - array->chip_cols;
-			side = E_SIDE_S;
-		} else if (i < 2 * array->chip_cols + array->chip_rows) {
-			/* West col */
-			arr_chip_row = i - 2 * array->chip_cols;
-			arr_chip_col = 0;
-			side = E_SIDE_W;
-		} else {
-			/* East col */
-			arr_chip_row =
-				i - (2 * array->chip_cols + array->chip_rows);
-			arr_chip_col = array->chip_cols - 1;
-			side = E_CTRLMODE_EAST;
-		}
-
-		ctrlmode = ctrlmode_hints[side];
-		coreid = array->id +				/* array  */
-			 COORDS(cinfo->rows * arr_chip_row,	/* chip   */
-				cinfo->cols * arr_chip_col) +
-			 cinfo->elink_coreid[side];		/* e-link */
-
-		dev_dbg(&epiphany->pdev->dev,
-			"Disabling elink 0x%x (%u, %u) in array 0x%x.\n",
-			coreid, ROW(coreid), COL(coreid), array->id);
-
-		err = coreid_to_phys(epiphany, coreid, &core_phys);
-		WARN_ON(err);
-		if (err)
-			continue;
-
-		regs_phys = (core_phys | E_REG_BASE) & PAGE_MASK;
-		regs = ioremap_nocache(regs_phys, PAGE_SIZE);
-		WARN_ON(!regs);
-		if (!regs)
-			continue;
-
-		/* Suboptimal, but works. We have not yet implemented a way to
-		 * figure out which host elink bridge the bus access will go
-		 * through. Instead, set ctrlmode for all host elinks connected
-		 * to the array, instead of the just one. */
-		for (conn = &array->connections[0]; *conn; conn++) {
-			elink = get_adjacent_elink(*conn, array);
-			if (!elink)
-				continue;
-
-			txcfg.reg = reg_read(elink->regs, E_SYS_CFGTX);
-			txcfg.ctrlmode = ctrlmode;
-			reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
-		}
-
-		reg_write(disable, regs, E_REG_LINKTXCFG & ~PAGE_MASK);
-		reg_write(disable, regs, E_REG_LINKRXCFG & ~PAGE_MASK);
-
-		/* Reset ctrlmode to normal */
-		for (conn = &array->connections[0]; *conn; conn++) {
-			elink = get_adjacent_elink(*conn, array);
-			if (!elink)
-				continue;
-
-			txcfg.reg = reg_read(elink->regs, E_SYS_CFGTX);
-			txcfg.ctrlmode = 0;
-			reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
-		}
-		iounmap(regs);
-	}
-
-	kfree(connected);
+	iounmap(regs);
 }
 
-static void array_enable_clock_gating(struct epiphany_device *epiphany,
+static void array_disable_disconnected_elinks(struct elink *elink,
+					      struct chip_array *array)
+{
+	int i;
+	const struct epiphany_chip_info *cinfo =
+		&epiphany_chip_info[array->chip_type];
+	enum elink_side side;
+	u32 mask = 0;
+	u16 north_chip, south_chip, east_chip, west_chip;
+
+	for (side = 0; side < ARRAY_SIZE(array->connections); side++) {
+		if (array->connections[side].type == E_CONN_DISCONNECTED)
+			mask |= 1 << side;
+
+	}
+
+	/* Walk north and south cols */
+	if (mask & ((1 << E_SIDE_N) | (1 << E_SIDE_S))) {
+		for (i = 0, north_chip = array->id;
+		     i < array->chip_cols;
+		     i++, north_chip += cinfo->cols) {
+			south_chip = north_chip +
+				COORDS((array->chip_rows - 1) * cinfo->rows, 0);
+
+			if (mask & (1 << E_SIDE_N)) {
+				elink_disable_chip_elink(elink, array,
+							 north_chip, E_SIDE_N);
+			}
+			if (mask & (1 << E_SIDE_S)) {
+				elink_disable_chip_elink(elink, array,
+							 south_chip, E_SIDE_S);
+			}
+		}
+	}
+
+	/* Walk east and west rows */
+	if (mask & ((1 << E_SIDE_E) | (1 << E_SIDE_W))) {
+		for (i = 0, west_chip = array->id;
+		     i < array->chip_rows;
+		     i++, west_chip += COORDS(1, 0)) {
+			east_chip = west_chip +
+				COORDS(0, (array->chip_cols - 1) * cinfo->cols);
+
+			if (mask & (1 << E_SIDE_W)) {
+				elink_disable_chip_elink(elink, array,
+							 west_chip, E_SIDE_W);
+			}
+			if (mask & (1 << E_SIDE_E)) {
+				elink_disable_chip_elink(elink, array,
+							 east_chip, E_SIDE_E);
+			}
+		}
+	}
+}
+
+static void array_enable_clock_gating(struct elink *elink,
 				      struct chip_array *array)
 {
 	int err, i, j, row0, col0, last_row, last_col;
@@ -500,7 +411,7 @@ static void array_enable_clock_gating(struct epiphany_device *epiphany,
 
 	for (i = row0; i < last_row; i++) {
 		for (j = col0; j < last_col; j++) {
-			err = coreid_to_phys(epiphany, COORDS(i, j), &core);
+			err = coreid_to_phys(elink, COORDS(i, j), &core);
 			WARN_ON(err);
 			if (err)
 				continue;
@@ -510,6 +421,7 @@ static void array_enable_clock_gating(struct epiphany_device *epiphany,
 			WARN_ON(!core_mem);
 			if (!core_mem)
 				continue;
+
 
 			config = E_REG_CONFIG & ~(PAGE_MASK);
 			reg_write(0x00400000, core_mem, config);
@@ -522,66 +434,113 @@ static void array_enable_clock_gating(struct epiphany_device *epiphany,
 	}
 }
 
-static int configure_adjacent_link(struct epiphany_device *epiphany,
-				   struct elink *elink)
+static int configure_chip_tx_divider(struct elink *elink,
+				     u16 chipid,
+				     enum elink_side side)
 {
-	struct device *dev = &epiphany->pdev->dev;
-	const struct epiphany_chip_info *cinfo;
-	union e_syscfg_tx txcfg;
 	int err;
-	u32 offset;
+	struct chip_array *array = elink->connection.array;
+	const struct epiphany_chip_info *cinfo =
+		&epiphany_chip_info[array->chip_type];
+	struct device *dev = &elink->epiphany->pdev->dev;
+	phys_addr_t core_phys, regs_phys;
 	u16 coreid;
-	phys_addr_t core, paddr;
-	void __iomem *core_mem;
-	struct chip_array *array;
+	void __iomem *regs;
+	union e_syscfg_tx txcfg;
+	u32 offset;
 
-	array = get_adjacent_chip_array(elink->connection, elink, NULL);
-	if (!array)
-		return 0;
 
 	/* Figure out which divider we need for the TX reg */
-	cinfo = &epiphany_chip_info[array->chip_type];
 	if (!cinfo->linkcfg_tx_divider)
 		return 0;
+
+	coreid = chipid + cinfo->elink_coreid[side];
 
 	dev_dbg(dev, "chip requires programming the link clock divider.\n");
 
 	txcfg.reg = reg_read(elink->regs, E_SYS_CFGTX);
+	txcfg.ctrlmode = ctrlmode_hints[side];
 
-	txcfg.ctrlmode =
-		get_adjacent_linkreg_ctrlmode(elink->connection, elink);
-
-	/* Calculate and map address */
-	coreid = get_adjacent_abs_coreid(elink->connection, elink);
-
-	err = coreid_to_phys(epiphany, coreid, &core);
+	err = coreid_to_phys(elink, coreid, &core_phys);
 	WARN_ON(err);
 	if (err)
 		return err;
 
-	paddr = (core | E_REG_LINKCFG) & PAGE_MASK;
+	regs_phys = (core_phys | E_REG_BASE) & PAGE_MASK;
+	regs = ioremap_nocache(regs_phys, PAGE_SIZE);
 	offset = E_REG_LINKCFG & ~(PAGE_MASK);
-	core_mem = ioremap_nocache(paddr, PAGE_SIZE);
-	if (!core_mem) {
-		dev_warn(dev, "Mapping emesh address space failed.\n");
-		return -ENOMEM;
-	}
+	WARN_ON(!regs);
+	if (!regs)
+		return -EIO;
 
-	/* Write */
+	txcfg.reg = reg_read(elink->regs, E_SYS_CFGTX);
+	txcfg.ctrlmode = ctrlmode_hints[side];
 	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
 
-	reg_write(cinfo->linkcfg_tx_divider, core_mem, offset);
+	reg_write(cinfo->linkcfg_tx_divider, regs, offset);
 
 	txcfg.ctrlmode = 0;
 	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
 
-	iounmap(core_mem);
+	iounmap(regs);
+	return 0;
+}
+
+static int configure_adjacent_links(struct elink *elink)
+{
+	int i;
+	const struct epiphany_chip_info *cinfo;
+	struct chip_array *array;
+	u16 north_chip, south_chip, east_chip, west_chip;
+
+	if (elink->connection.type != E_CONN_ARRAY)
+		return 0;
+
+	array = elink->connection.array;
+	cinfo = &epiphany_chip_info[array->chip_type];
+
+	if (elink->connection.side == E_SIDE_N ||
+	    elink->connection.side == E_SIDE_S) {
+		for (i = 0, north_chip = array->id;
+		     i < array->chip_cols;
+		     i++, north_chip += cinfo->cols) {
+			south_chip = north_chip +
+				COORDS((array->chip_rows - 1) * cinfo->rows, 0);
+
+			if (elink->connection.side == E_SIDE_N) {
+				return configure_chip_tx_divider(elink,
+								 north_chip,
+								 E_SIDE_N);
+			} else {
+				return configure_chip_tx_divider(elink,
+								 south_chip,
+								 E_SIDE_S);
+			}
+		}
+	} else {
+		for (i = 0, west_chip = array->id;
+		     i < array->chip_rows;
+		     i++, west_chip += COORDS(1, 0)) {
+			east_chip = west_chip +
+				COORDS(0, (array->chip_cols - 1) * cinfo->cols);
+
+			if (elink->connection.side == E_SIDE_W) {
+				return configure_chip_tx_divider(elink,
+								 west_chip,
+								 E_SIDE_W);
+			} else {
+				return configure_chip_tx_divider(elink,
+								 east_chip,
+								 E_SIDE_E);
+			}
+		}
+	}
 
 	return 0;
 }
 
 /* Reset the Epiphany platform */
-static int reset_elink(struct epiphany_device *epiphany, struct elink *elink)
+static int reset_elink(struct elink *elink)
 {
 	int retval = 0;
 	union e_syscfg_tx txcfg = {0};
@@ -609,6 +568,10 @@ static int reset_elink(struct epiphany_device *epiphany, struct elink *elink)
 	clkcfg.divider = 0;
 	reg_write(clkcfg.reg, elink->regs, E_SYS_CFGCLK);
 
+	/* Configure core id. Here should be the right place? clocks disabled
+	 * and reset asserted. */
+	reg_write(elink->coreid_pinout, elink->regs, E_SYS_COREID);
+
 	/* Deassert reset */
 	reg_write(0, elink->regs, E_SYS_RESET);
 
@@ -628,7 +591,7 @@ static int reset_elink(struct epiphany_device *epiphany, struct elink *elink)
 	rxcfg.enable = 1;
 	reg_write(rxcfg.reg, elink->regs, E_SYS_CFGRX);
 
-	retval = configure_adjacent_link(epiphany, elink);
+	retval = configure_adjacent_links(elink);
 
 	epiphany_sleep();
 	return retval;
@@ -702,28 +665,33 @@ static int epiphany_reset(struct epiphany_device *epiphany)
 	}
 
 	list_for_each_entry(elink, &epiphany->elink_list, list) {
-		err = reset_elink(epiphany, elink);
+		err = reset_elink(elink);
 		if (err) {
 			retval = -EIO;
 			goto out;
 		}
 	}
 
-	list_for_each_entry(array, &epiphany->chip_array_list, list) {
-		array_enable_clock_gating(epiphany, array);
-		array_disable_disconnected_elinks(epiphany, array);
+	list_for_each_entry(elink, &epiphany->elink_list, list) {
+		if (elink->connection.type != E_CONN_ARRAY)
+			continue;
+		array_enable_clock_gating(elink, elink->connection.array);
+		array_disable_disconnected_elinks(elink,
+						  elink->connection.array);
 	}
 
 out:
 	return retval;
 }
 
-static int epiphany_char_open(struct inode *inode, struct file *file)
+static int elink_char_open(struct inode *inode, struct file *file)
 {
 	int err, retval = 0;
+	struct elink *elink;
 	struct epiphany_device *epiphany;
 
-	epiphany = to_epiphany_device(file);
+	elink = file_to_elink(file);
+	epiphany = elink->epiphany;
 
 	if (mutex_lock_interruptible(&driver_lock))
 		return -ERESTARTSYS;
@@ -745,13 +713,28 @@ mtx_unlock:
 	return retval;
 }
 
-static int epiphany_char_release(struct inode *inode, struct file *file)
+static void epiphany_disable(struct epiphany_device *epiphany)
 {
-	struct epiphany_device *epiphany;
 	struct elink *elink;
 	struct chip_array *array;
 
-	epiphany = to_epiphany_device(file);
+	list_for_each_entry(elink, &epiphany->elink_list, list)
+		disable_elink(elink);
+
+	list_for_each_entry(array, &epiphany->chip_array_list, list) {
+		if (array->supply)
+			regulator_disable(array->supply);
+	}
+
+}
+
+static int elink_char_release(struct inode *inode, struct file *file)
+{
+	struct epiphany_device *epiphany;
+	struct elink *elink;
+
+	elink = file_to_elink(file);
+	epiphany = elink->epiphany;
 
 	/* Not sure if interruptible is a good idea here ... */
 	mutex_lock(&driver_lock);
@@ -760,14 +743,7 @@ static int epiphany_char_release(struct inode *inode, struct file *file)
 
 	if (!epiphany->u_count) {
 		/* if (!epiphany->param_no_powersave) */
-		list_for_each_entry(elink, &epiphany->elink_list, list)
-			disable_elink(elink);
-
-		list_for_each_entry(array, &epiphany->chip_array_list, list) {
-			if (array->supply)
-				regulator_disable(array->supply);
-		}
-
+		epiphany_disable(epiphany);
 		dev_dbg(&epiphany->pdev->dev, "no users\n");
 	}
 
@@ -806,27 +782,28 @@ static const struct vm_operations_struct mmap_mem_ops = {
 #endif
 };
 
-static int epiphany_char_mmap(struct file *file, struct vm_area_struct *vma)
+static int elink_char_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	unsigned long off = vma->vm_pgoff << PAGE_SHIFT;
 	unsigned long size = vma->vm_end - vma->vm_start;
-	struct epiphany_device *epiphany = to_epiphany_device(file);
-	struct elink *elink;
+	struct elink *elink = file_to_elink(file);
+	struct epiphany_device *epiphany = elink->epiphany;
 	struct mem_region *region;
 
 	vma->vm_ops = &mmap_mem_ops;
 
-	if (epiphany->emesh_start <= off &&
-	    off + size <= epiphany->emesh_start + epiphany->emesh_size)
+	/* TODO: adjust address */
+
+	if (elink->emesh_start <= off &&
+	    off + size <= elink->emesh_start + elink->emesh_size)
 		return epiphany_map_memory(vma, true);
 
 	/* TODO: Should only be allowed if param_unsafe is set */
-	list_for_each_entry(elink, &epiphany->elink_list, list) {
-		if (elink->regs_start <= off &&
-		    off + size <= elink->regs_start + elink->regs_size)
-			return epiphany_map_memory(vma, true);
-	}
+	if (elink->regs_start <= off &&
+	    off + size <= elink->regs_start + elink->regs_size)
+		return epiphany_map_memory(vma, true);
 
+	/* TODO: Access through separate device? /dev/emem */
 	list_for_each_entry(region, &epiphany->mem_region_list, list) {
 		if (region->start <= off &&
 		    off + size <= region->start + region->size)
@@ -840,11 +817,12 @@ static int epiphany_char_mmap(struct file *file, struct vm_area_struct *vma)
 	return -EINVAL;
 }
 
-static long epiphany_char_ioctl(struct file *file, unsigned int cmd,
+static long elink_char_ioctl(struct file *file, unsigned int cmd,
 				unsigned long arg)
 {
 	int err = 0;
-	struct epiphany_device *epiphany = to_epiphany_device(file);
+	/* TODO: Reset elink only instead of entire system ? */
+	struct epiphany_device *epiphany = file_to_elink(file)->epiphany;
 
 	if (_IOC_TYPE(cmd) != EPIPHANY_IOC_MAGIC)
 		return -ENOTTY;
@@ -888,12 +866,12 @@ static long epiphany_char_ioctl(struct file *file, unsigned int cmd,
 	return 0;
 }
 
-static const struct file_operations epiphany_char_driver_ops = {
+static const struct file_operations elink_char_driver_ops = {
 	.owner		= THIS_MODULE,
-	.open		= epiphany_char_open,
-	.release	= epiphany_char_release,
-	.mmap		= epiphany_char_mmap,
-	.unlocked_ioctl	= epiphany_char_ioctl
+	.open		= elink_char_open,
+	.release	= elink_char_release,
+	.mmap		= elink_char_mmap,
+	.unlocked_ioctl	= elink_char_ioctl
 };
 
 static int dt_probe_reserved_mem(struct epiphany_device *epiphany)
@@ -945,57 +923,103 @@ out:
 	return retval;
 }
 
-static int dt_probe_connections(struct epiphany_device *epiphany)
+static struct chip_array *dt_probe_chip_array(struct epiphany_device *epiphany,
+					      struct elink *elink,
+					      struct device_node *np,
+					      enum elink_side *out_side)
 {
 	struct platform_device *pdev = epiphany->pdev;
 	struct device *dev = &pdev->dev;
-	struct connection *connection;
-	struct of_phandle_args u_args, v_args;
+	struct device_node *supply_node;
+	struct chip_array *array;
+	struct regulator *supply;
+	enum elink_side side;
+	u32 reg[4];
 	int err;
-	int retval = 0; /* Allow 0 connections - hot-plugging */
-	int i;
+	const char *supply_name;
 
-	for (i = 0; i < MAX_CONNECTIONS; i++) {
-		err = of_parse_phandle_with_fixed_args(
-				dev->of_node, "adapteva,connections", 1,
-				(2 * i), &u_args);
-		if (err)
-			break;
+	array = devm_kzalloc(dev, sizeof(*array), GFP_KERNEL);
+	if (!array)
+		return ERR_PTR(-ENOMEM);
 
-		err = of_parse_phandle_with_fixed_args(
-				dev->of_node, "adapteva,connections", 1,
-				(2 * i + 1), &v_args);
-		if (err) {
-			retval = -EINVAL;
-			goto put_u;
-		}
+	array->phandle = np->phandle;
 
-		connection = devm_kzalloc(dev, sizeof(*connection), GFP_KERNEL);
-		if (!connection) {
-			retval = -ENOMEM;
-			goto put_v;
-		}
-
-		connection->u_phandle = u_args.np->phandle;
-		connection->u_rel_coreid = u_args.args[0];
-		connection->v_phandle = v_args.np->phandle;
-		connection->v_rel_coreid = v_args.args[0];
-
-		list_add_tail(&connection->list, &epiphany->connection_list);
-
-		dev_dbg(dev, "connection: added connection %s  <-->  %s\n",
-			u_args.np->name, v_args.np->name);
-
-put_v:
-		of_node_put(v_args.np);
-put_u:
-		of_node_put(u_args.np);
-
-		if (retval)
-			break;
+	/* There is probably a better way for doing this */
+	err = of_property_read_u32_array(np, "reg", reg, 4);
+	if (err) {
+		dev_err(dev, "arrays: invalid reg property\n");
+		return ERR_PTR(err);
 	}
 
-	return retval;
+	array->id = (u16) reg[0];
+	side = reg[1];
+	array->chip_rows = reg[2];
+	array->chip_cols = reg[3];
+
+	if (elink->quirk_coreid_is_noop && array->id != 0x808)
+		dev_warn(dev, "arrays: non default id and elink coreid is no-op\n");
+
+	if (elink->coreid_pinout == -1) {
+		dev_dbg(dev, "arrays: setting elink coreid to array id 0x%03x\n",
+			array->id);
+		elink->coreid_pinout = array->id;
+	}
+
+	array->chip_type = elink->chip_type;
+
+	/* TODO: Support more than one regulator per array */
+	supply_node = of_parse_phandle(np, "vdd-supply", 0);
+	if (!supply_node) {
+		dev_warn(dev, "arrays: no supply node specified, no power management.\n");
+		goto no_supply_node;
+	}
+
+	err = of_property_read_string(supply_node, "regulator-name",
+				      &supply_name);
+	if (err) {
+		dev_info(dev, "arrays: no regulator name\n");
+		of_node_put(supply_node);
+		return ERR_PTR(err);
+	}
+
+	supply = devm_regulator_get(dev, supply_name);
+	if (IS_ERR(supply)) {
+		if (PTR_ERR(supply) == -EPROBE_DEFER) {
+			dev_info(dev,
+				 "arrays: %s regulator not ready, retry\n",
+				 np->name);
+		} else {
+			dev_info(dev,
+				 "arrays: no regulator %s: %ld\n",
+				 np->name, PTR_ERR(supply));
+		}
+		of_node_put(supply_node);
+		return ERR_PTR(PTR_ERR(supply));
+	}
+
+	of_node_put(supply_node);
+	array->supply = supply;
+
+no_supply_node:
+
+	switch (side) {
+	case E_SIDE_N ... E_SIDE_W:
+		array->connections[side].type = E_CONN_ELINK;
+		array->connections[side].elink = elink;
+		dev_dbg(dev, "arrays: added connection\n");
+		break;
+
+	default:
+		dev_err(dev, "Invalid side %u\n", (u32) side);
+		return ERR_PTR(-EINVAL);
+	}
+
+	/* TODO: Parse other connections */
+
+	list_add_tail(&array->list, &epiphany->chip_array_list);
+
+	*out_side = side;
+	return array;
 }
 
 static int probe_elink(struct epiphany_device *epiphany, struct elink *elink)
@@ -1016,6 +1040,14 @@ static int probe_elink(struct epiphany_device *epiphany, struct elink *elink)
 		dev_info(dev, "elink: unsupported platform: 0x%x.\n",
 			 version.platform);
 		return -EINVAL;
+	}
+
+	/* setting coreid in fpga elink regs is a no-op with current
+	 * bitstreams. */
+	if (true) {
+		elink->quirk_coreid_is_noop = true;
+		elink->coreid_pinout = reg_read(elink->regs, E_SYS_COREID);
+		dev_dbg(dev, "elinks: quirk: setting coreid reg is no-op\n");
 	}
 
 	elink->version = version;
@@ -1059,251 +1091,145 @@ static int dt_probe_elink_clks(struct epiphany_device *epiphany,
 	return retval;
 }
 
+static int dt_probe_elink(struct epiphany_device *epiphany,
+			  struct device_node *np)
+{
+	struct platform_device *pdev = epiphany->pdev;
+	struct device *dev = &pdev->dev;
+	struct elink *elink;
+	struct resource res;
+	struct device_node *array_np;
+	enum elink_side side = -1;
+	u16 coreid;
+	int err;
+
+	elink = devm_kzalloc(dev, sizeof(*elink), GFP_KERNEL);
+	if (!elink)
+		return -ENOMEM;
+
+	elink->epiphany = epiphany;
+	elink->phandle = np->phandle;
+	elink->coreid_pinout = -1;
+
+	/* Add to list early so epiphany_cleanup() will see it */
+	list_add_tail(&elink->list, &epiphany->elink_list);
+
+	/* Control regs */
+	err = of_address_to_resource(np, 0, &res);
+	if (err) {
+		dev_warn(dev, "elinks: no resource\n");
+		return err;
+	}
+
+	if (!devm_request_mem_region(dev, res.start,
+				     resource_size(&res), pdev->name)) {
+		dev_warn(dev, "elinks: failed requesting mem region\n");
+		return -ENOMEM;
+	}
+
+	elink->regs_start = res.start;
+	elink->regs_size = resource_size(&res);
+	elink->regs = devm_ioremap_nocache(dev, elink->regs_start,
+					   elink->regs_size);
+
+	if (!elink->regs) {
+		dev_warn(dev, "elinks: Mapping eLink registers failed.\n");
+		return -ENOMEM;
+	}
+
+	/* Host bus slave address range for emesh */
+	err = of_address_to_resource(np, 1, &res);
+	if (err) {
+		dev_warn(dev, "elinks: no resource\n");
+		return err;
+	}
+
+	if (!devm_request_mem_region(dev, res.start,
+				     resource_size(&res), pdev->name)) {
+		dev_warn(dev, "elinks: failed requesting emesh mem region\n");
+		return -ENOMEM;
+	}
+
+	elink->emesh_start = res.start;
+	elink->emesh_size = resource_size(&res);
+
+	/* Clocks */
+	err = dt_probe_elink_clks(epiphany, elink);
+	if (err) {
+		dev_warn(dev, "elinks: Could not get clocks\n");
+		return err;
+	}
+
+	err = probe_elink(epiphany, elink);
+	if (err)
+		return err;
+
+	/* Manually override coreid pinout. Set by array probe otherwise */
+	err = of_property_read_u16(np, "adapteva,coreid", &coreid);
+	if (!err) {
+		elink->coreid_pinout = (s16) coreid;
+	} else if (err == -EINVAL) {
+		elink->coreid_pinout = -1;
+	} else if (err) {
+		dev_warn(dev, "elinks: Malformed coreid pinout dt property\n");
+		return err;
+	}
+
+	/* Only support array connections for now */
+	/* (and we will always only support 1 connection/elink) */
+	array_np = get_next_compatible_child(np, NULL, "adapteva,chip-array");
+	if (!array_np) {
+		dev_info(dev, "elink has no connections\n");
+		return 0;
+	}
+
+	elink->connection.array = dt_probe_chip_array(epiphany, elink, array_np,
+						      &side);
+	if (IS_ERR(elink->connection.array)) {
+		err = PTR_ERR(elink->connection.array);
+		elink->connection.array = NULL;
+		return err;
+	}
+	elink->connection.type = E_CONN_ARRAY;
+	elink->connection.side = side;
+
+	/* Char dev registration: TODO: Don't use miscdevice */
+	elink->misc.minor = MISC_DYNAMIC_MINOR;
+	elink->misc.name = "elink0"; /* TODO: Pull seqnum from minor */
+	elink->misc.fops = &elink_char_driver_ops;
+
+	err = misc_register(&elink->misc);
+	if (err) {
+		dev_warn(dev, "CHAR registration failed for elink driver\n");
+		return err;
+	}
+	elink->misc_registered = true;
+
+	dev_dbg(dev, "elink: successfully added elink\n");
+
+	return 0;
+}
+
 static int dt_probe_elinks(struct epiphany_device *epiphany)
 {
 	struct platform_device *pdev = epiphany->pdev;
 	struct device *dev = &pdev->dev;
 	struct device_node *np;
-	struct elink *elink;
-	struct connection *connection;
-	struct resource res;
 	int err;
-	int retval = -ENOENT; /* Require at least one entry */
-	int i;
 
-	for (i = 0; i < MAX_ELINK_BRIDGES; i++) {
-		np = of_parse_phandle(dev->of_node, "adapteva,elinks", i);
-		if (!np)
-			break;
-
-		err = of_address_to_resource(np, 0, &res);
-		if (err) {
-			dev_warn(dev, "elinks: no resource\n");
-			retval = err;
-			break;
-		}
-
-		if (!devm_request_mem_region(dev, res.start,
-					     resource_size(&res), pdev->name)) {
-			dev_warn(dev, "elinks: failed requesting mem region\n");
-			retval = -ENOMEM;
-			break;
-		}
-
-		elink = devm_kzalloc(dev, sizeof(*elink), GFP_KERNEL);
-		if (!elink) {
-			retval = -ENOMEM;
-			break;
-		}
-
-		/* Add to list early so epiphany_cleanup() will see it */
-		list_add_tail(&elink->list, &epiphany->elink_list);
-
-		elink->regs_start = res.start;
-		elink->regs_size = resource_size(&res);
-		elink->regs = devm_ioremap_nocache(dev, elink->regs_start,
-						   elink->regs_size);
-
-		if (!elink->regs) {
-			dev_warn(dev, "elinks: Mapping eLink registers failed.\n");
-			retval = -ENOMEM;
-			break;
-		}
-
-		err = dt_probe_elink_clks(epiphany, elink);
-		if (err) {
-			dev_warn(dev, "elinks: Could not get clocks\n");
-			retval = err;
-			break;
-		}
-
-		elink->phandle = np->phandle;
-		err = of_property_read_u16(np, "adapteva,coreids",
-					   &elink->coreid_pinout);
-		if (err) {
-			dev_warn(dev, "elinks: Could not read coreid pinout\n");
-			retval = err;
-			break;
-		}
-
-		err = probe_elink(epiphany, elink);
-		if (err) {
-			retval = err;
-			break;
-		}
-
-		list_for_each_entry(connection, &epiphany->connection_list,
-				    list) {
-			if (connection->u_phandle != elink->phandle &&
-			    connection->v_phandle != elink->phandle)
-				continue;
-
-			if (connection->u_phandle == elink->phandle) {
-				connection->u = elink;
-				connection->u_is_host_bridge = true;
-			} else {
-				connection->v = elink;
-				connection->v_is_host_bridge = true;
-			}
-			elink->connection = connection;
-			dev_dbg(dev, "elinks: added connection\n");
-		}
-
-		dev_dbg(dev, "elinks: successfully added elink\n");
-
-		/* Found at least one elink */
-		retval = 0;
+	for_each_compatible_child(dev->of_node, np, "adapteva,elink") {
+		err = dt_probe_elink(epiphany, np);
+		if (err)
+			return err;
 	}
 
-	return retval;
-}
-
-static int dt_probe_chip_arrays(struct epiphany_device *epiphany)
-{
-	struct platform_device *pdev = epiphany->pdev;
-	struct device *dev = &pdev->dev;
-	struct device_node *np, *emesh, *supply_node;
-	struct chip_array *array;
-	struct connection *connection;
-	struct connection **conn;
-	struct regulator *supply;
-	u32 reg[3];
-	int nconns = 0;
-	int err;
-	int i;
-	int retval = 0; /* Allow 0 arrays - hot-plugging */
-	const char *model, *supply_name;
-
-	emesh = of_get_child_by_name(dev->of_node, "epiphany-mesh");
-	if (!emesh) {
-		dev_warn(dev, "arrays: no epiphany-mesh node\n");
-		return -ENOENT;
-	}
-
-	for_each_child_of_node(emesh, np) {
-
-		array = devm_kzalloc(dev, sizeof(*array), GFP_KERNEL);
-		if (!array) {
-			retval = -ENOMEM;
-			break;
-		}
-
-		/* Figure out how many connections array has */
-		list_for_each_entry(connection, &epiphany->connection_list,
-				    list) {
-			if (connection->u_phandle == np->phandle ||
-			    connection->v_phandle == np->phandle)
-				nconns++;
-			dev_dbg(dev, "arrays: found connection %d\n",
-				np->phandle);
-		}
-		/* ... so we can allocate the right amount of memory */
-
-		array->connections = devm_kcalloc(dev, nconns + 1,
-						  sizeof(*conn), GFP_KERNEL);
-		array->phandle = np->phandle;
-
-		/* There is probably a better way for doing this */
-		err = of_property_read_u32_array(np, "reg", reg, 3);
-		if (err) {
-			dev_warn(dev, "arrays: invalid reg property\n");
-			retval = err;
-			break;
-		}
-
-		array->id = (u16) reg[0];
-		array->chip_rows = reg[1];
-		array->chip_cols = reg[2];
-
-		err = of_property_read_string(np, "adapteva,chip-model",
-					      &model);
-		if (err) {
-			dev_warn(dev, "arrays: invalid chip model property\n");
-			retval = err;
-			break;
-		}
-
-		err = -ENOENT;
-		for (i = 0; i < ARRAY_SIZE(epiphany_chip_of_match); i++) {
-			if (!strcmp(model, epiphany_chip_of_match[i].name)) {
-				array->chip_type =
-					epiphany_chip_of_match[i].type;
-				err = 0;
-				break;
-			}
-		}
-		if (err) {
-			dev_warn(dev, "arrays: invalid chip model\n");
-			retval = err;
-			break;
-		}
-
-		/* TODO: Support more than one regulator per array */
-		supply_node = of_parse_phandle(np, "ecore-supply", 0);
-		if (!supply_node) {
-			dev_warn(dev, "arrays: no supply node specified, no power management.\n");
-			goto no_supply_node;
-		}
-
-		err = of_property_read_string(supply_node, "regulator-name",
-					      &supply_name);
-		if (err) {
-			dev_info(dev, "arrays: no regulator name\n");
-			retval = -ENOENT;
-			break;
-		}
-
-		supply = devm_regulator_get(dev, supply_name);
-		if (IS_ERR(supply)) {
-			if (PTR_ERR(supply) == -EPROBE_DEFER) {
-				dev_info(dev,
-					 "arrays: %s regulator not ready, retry\n",
-					 np->name);
-			} else {
-				dev_info(dev,
-					 "arrays: no regulator %s: %ld\n",
-					 np->name, PTR_ERR(supply));
-			}
-
-			retval = PTR_ERR(supply);
-			break;
-		}
-
-		array->supply = supply;
-
-no_supply_node:
-
-		conn = &array->connections[0];
-		list_for_each_entry(connection, &epiphany->connection_list,
-				    list) {
-			if (connection->u_phandle != array->phandle &&
-			    connection->v_phandle != array->phandle)
-				continue;
-
-			if (connection->u_phandle == array->phandle) {
-				connection->u = array;
-				connection->u_is_host_bridge = false;
-			} else {
-				connection->v = array;
-				connection->v_is_host_bridge = false;
-			}
-			*conn = connection;
-			conn++;
-			dev_dbg(dev, "arrays: added connection\n");
-		}
-
-		list_add_tail(&array->list, &epiphany->chip_array_list);
-	}
-
-	return retval;
+	return 0;
 }
 
 static int dt_probe(struct epiphany_device *epiphany)
 {
 	struct platform_device *pdev = epiphany->pdev;
 	struct device *dev = &pdev->dev;
-	struct device_node *np;
-	struct resource res;
 	int err;
 
 	err = dt_probe_reserved_mem(epiphany);
@@ -1312,37 +1238,9 @@ static int dt_probe(struct epiphany_device *epiphany)
 		return err;
 	}
 
-	np = of_get_child_by_name(dev->of_node, "epiphany-mesh");
-	if (!np) {
-		dev_warn(dev, "dt: no epiphany-mesh node\n");
-		return -ENOENT;
-	}
-	err = of_address_to_resource(np, 0, &res);
-	if (err) {
-		dev_warn(dev, "dt: no resource\n");
-		return err;
-	}
-	if (!devm_request_mem_region(dev, res.start, resource_size(&res),
-				     np->full_name)) {
-		dev_warn(dev, "epiphany-mesh: failed requesting mem region\n");
-		return -ENOMEM;
-	}
-	epiphany->emesh_start = res.start;
-	epiphany->emesh_size = resource_size(&res);
-
-	err = dt_probe_connections(epiphany);
-	if (err) {
-		dev_warn(dev, "dt: error parsing connections.\n");
-		return err;
-	}
 	err = dt_probe_elinks(epiphany);
 	if (err) {
 		dev_warn(dev, "dt: error parsing elinks.\n");
-		return err;
-	}
-	err = dt_probe_chip_arrays(epiphany);
-	if (err) {
-		dev_warn(dev, "dt: error parsing arrays.\n");
 		return err;
 	}
 
@@ -1354,8 +1252,12 @@ static void epiphany_cleanup(struct epiphany_device *epiphany)
 	struct elink *elink;
 	struct clk **clk;
 
-	if (epiphany->misc_registered)
-		misc_deregister(&epiphany->misc);
+	list_for_each_entry(elink, &epiphany->elink_list, list) {
+		if (elink->misc_registered) {
+			misc_deregister(&elink->misc);
+			elink->misc_registered = false;
+		}
+	}
 
 	list_for_each_entry(elink, &epiphany->elink_list, list) {
 		if (!elink->clocks)
@@ -1380,7 +1282,6 @@ static int epiphany_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	INIT_LIST_HEAD(&epiphany->elink_list);
-	INIT_LIST_HEAD(&epiphany->connection_list);
 	INIT_LIST_HEAD(&epiphany->mem_region_list);
 	INIT_LIST_HEAD(&epiphany->chip_array_list);
 
@@ -1393,19 +1294,9 @@ static int epiphany_probe(struct platform_device *pdev)
 		else
 			dev_warn(dev, "Failed parsing device tree\n");
 
-		goto cleanup;
+		epiphany_cleanup(epiphany);
+		return retval;
 	}
-
-	epiphany->misc.minor = MISC_DYNAMIC_MINOR;
-	epiphany->misc.name = DRIVERNAME;
-	epiphany->misc.fops = &epiphany_char_driver_ops;
-
-	retval = misc_register(&epiphany->misc);
-	if (retval) {
-		dev_warn(dev, "CHAR registration failed for epiphany driver\n");
-		goto cleanup;
-	}
-	epiphany->misc_registered = true;
 
 	platform_set_drvdata(pdev, epiphany);
 
@@ -1422,10 +1313,6 @@ static int epiphany_probe(struct platform_device *pdev)
 	}
 
 	return 0;
-
-cleanup:
-	epiphany_cleanup(epiphany);
-	return retval;
 }
 
 static int epiphany_remove(struct platform_device *pdev)
