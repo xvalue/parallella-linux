@@ -141,6 +141,7 @@ struct epiphany_device {
 	struct list_head chip_array_list;
 
 	struct miscdevice misc;
+	bool misc_registered;
 };
 
 static inline void epiphany_sleep(void)
@@ -358,6 +359,9 @@ static int dt_probe_elinks(struct epiphany_device *epiphany)
 			break;
 		}
 
+		/* Add to list early so epiphany_cleanup() will see it */
+		list_add_tail(&elink->list, &epiphany->elink_list);
+
 		elink->regs_start = res.start;
 		elink->regs_size = resource_size(&res);
 		elink->regs = devm_ioremap_nocache(dev, elink->regs_start,
@@ -397,8 +401,7 @@ static int dt_probe_elinks(struct epiphany_device *epiphany)
 			dev_dbg(dev, "elinks: added connection\n");
 		}
 
-		list_add_tail(&elink->list, &epiphany->elink_list);
-		dev_dbg(dev, "elinks: added elink\n");
+		dev_dbg(dev, "elinks: successfully added elink\n");
 
 		/* Found at least one elink */
 		retval = 0;
@@ -562,6 +565,14 @@ static int dt_probe(struct epiphany_device *epiphany)
 	return 0;
 }
 
+static void epiphany_cleanup(struct epiphany_device *epiphany)
+{
+	if (epiphany->misc_registered)
+		misc_deregister(&epiphany->misc);
+
+	/* Everything else is allocated with devm_* */
+}
+
 static int epiphany_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -588,7 +599,7 @@ static int epiphany_probe(struct platform_device *pdev)
 		else
 			dev_warn(dev, "Failed parsing device tree\n");
 
-		return retval;
+		goto cleanup;
 	}
 
 	epiphany->misc.minor = MISC_DYNAMIC_MINOR;
@@ -598,8 +609,9 @@ static int epiphany_probe(struct platform_device *pdev)
 	retval = misc_register(&epiphany->misc);
 	if (retval) {
 		dev_warn(dev, "CHAR registration failed for epiphany driver\n");
-		return retval;
+		goto cleanup;
 	}
+	epiphany->misc_registered = true;
 
 	platform_set_drvdata(pdev, epiphany);
 
@@ -616,15 +628,17 @@ static int epiphany_probe(struct platform_device *pdev)
 	}
 
 	return 0;
+
+cleanup:
+	epiphany_cleanup(epiphany);
+	return retval;
 }
 
 static int epiphany_remove(struct platform_device *pdev)
 {
 	struct epiphany_device *epiphany = platform_get_drvdata(pdev);
 
-	misc_deregister(&epiphany->misc);
-
-	/* Everything else is allocated with devm_* */
+	epiphany_cleanup(epiphany);
 
 	dev_dbg(&epiphany->pdev->dev, "device removed\n");
 
