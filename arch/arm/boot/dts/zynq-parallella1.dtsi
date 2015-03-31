@@ -79,42 +79,40 @@
 
 &fpga {
 	epiphany: epiphany {
-		#address-cells = <1>;
-		#size-cells = <1>;
-		ranges;
-
-		compatible = "adapteva,epiphany";
-
-		clocks = <&clkc 15>, <&clkc 16>, <&clkc 17>, <&clkc 18>;
-		clock-names = "fclk0", "fclk1", "fclk2", "fclk3";
-
-		memory-region = <&emem>;
-
-		/* Refers FPGA elink interface(s), perhaps we need a better
-		 * name, bridge?
-		 */
-		adapteva,elinks = <&elink0>;
-
-		/* physical eLink connections between arrays.
-		 * connections within array must follow predefined pattern.
-		 * <phandle1, relative coreid1, phandle2, coreid2, [...]>
-		 * need phandles since FPGA does not have any cores = no coreid
-		 */
-		adapteva,connections = <&elink0 0 &array0 0x83>;
-
-		/* This might be better */
-		/*adapteva,connections = <&elink0 "west">, <&array0 "east">;*/
-		/* or */
-		/*adapteva,connections = <&elink0 E_WEST &array0 E_EAST>;*/
 	};
 };
 
 &epiphany {
-	elink0: elink0@70000000 {
-		reg = <0x70000000 0x1000>;
+	compatible = "adapteva,epiphany";
+	#address-cells = <1>;
+	#size-cells = <1>;
+	ranges;
 
-		/* coreid pin-out register(s) configuration. */
-		adapteva,coreids = <0x808>;
+	clocks = <&clkc 15>, <&clkc 16>, <&clkc 17>, <&clkc 18>;
+	clock-names = "fclk0", "fclk1", "fclk2", "fclk3";
+
+	memory-region = <&emem>;
+
+	elink0: elink0@70000000 {
+		/* Can have at most one child node with compatible string
+		 * "adapteva,array" or "adapteva,gpio" ??? */
+
+		compatible = "adapteva,elink";
+		#address-cells = <2>; /* <north-west core's id, side (NESW)> */
+		#size-cells = <2>; /* <#chip rows, #chip cols> */
+
+		/* First range is FPGA config regs.
+		 * Second range is mappable emesh region.
+		 * _4_ * 64 * (1<<20)
+		 */
+		reg = <0x70000000 0x1000>, <0x80000000 0x10000000>;
+
+		/* (Optional) coreid pin-out register(s) configuration. */
+		/* If we add some constraints we could derive this from the
+		 * child node ???
+		 */
+		/*adapteva,coreid = <0x808>; */
+
 
 		/* Initial FPGA elink MMU config. This is hardcoded in the FPGA
 		 * code now.
@@ -123,34 +121,33 @@
 		 * anyways. And if not this is the only mapping we will allow */
 		/*adapteva,mmu = <0x8e000000 0x3e000000 0x02000000>;*/
 
-	};
+		array0@808 {
+			compatible = "adapteva,chip-array";
+			/* North-westmost coreid, #NESW, #chip rows, #chip cols */
+			reg = <0x808 1 1 1>;
 
-	emesh: epiphany-mesh {
-		#address-cells = <1>; /* <north-west core's id> */
-		#size-cells = <2>; /* <#chip rows, #chip cols> */
-
-		/* Host address range (including empty space) */
-		reg = <0x80000000 0x40000000>;
-
-		/* Use chip-arrays instead having one dt entry per chip
-		 * (e.g., a Epiphany-III array w/ 1024 cores would require 64
-		 * dt entries), with this approach we just need one.
-		 */
-		array0: array0@808 {
-			/* <north-west coreid, #chip rows, #chip cols> */
-			reg = <0x808 1 1>;
-			/* Must be uniform */
-			adapteva,chip-model = "epiphany3";
-
-			/* Optional per chip dims Rows cols, uniform */
-			/* adapteva,chip-dims = <4 4>; */
-
-			/* Power / thermal control. Will not implement much for
+			/* TODO: Move to elink node? */
+			/* Optional power / thermal control. Will not implement much for
 			 * now but will read supply voltage to check if we can
 			 * run chip elink TX at full speed. Can be a list. */
-			ecore-supply = <&regulator_epiphany>;
+			vdd-supply = <&regulator_epiphany>; /* Can be a list */
 			/*io-channels = <&adc 0>;*/
 			/*io-channel-names = "zynq_temp";*/
+
+/*
+			// reg North=0, East=1, South=2, West=3
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				port@0 {
+					reg = <1>;
+
+					array0_east: endpoint {
+						remote-endpoint = <&elink0_port>;
+					};
+				};
+			};
+*/
 		};
 	};
 };
