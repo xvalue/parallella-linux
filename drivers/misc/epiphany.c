@@ -1065,6 +1065,15 @@ static int probe_elink(struct epiphany_device *epiphany, struct elink *elink)
 	elink->version = version;
 	elink->chip_type = elink_platform_chip_match[version.platform];
 
+	dev_info(dev, "Epiphany FPGA elink at address %pa\n",
+		 &elink->regs_start);
+	dev_info(dev,
+		 "revision %02x type %02x platform %02x generation %02x\n",
+		 version.revision,
+		 version.type,
+		 version.platform,
+		 version.generation);
+
 	return 0;
 }
 
@@ -1347,8 +1356,6 @@ static int epiphany_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct epiphany_device *epiphany;
-	struct elink *elink;
-	union e_syscfg_version version;
 	int retval;
 
 	/* TODO: Should go in init function */
@@ -1388,18 +1395,6 @@ static int epiphany_probe(struct platform_device *pdev)
 			dev_warn(dev, "Failed parsing device tree\n");
 
 		goto err_dt;
-	}
-
-	list_for_each_entry(elink, &epiphany->elink_list, list) {
-		dev_info(dev, "Epiphany FPGA elink at address %pa\n",
-			 &elink->regs_start);
-		version.reg = reg_read(elink->regs, E_SYS_VERSION);
-		dev_info(dev,
-			 "revision %02x type %02x platform %02x generation %02x\n",
-			 version.revision,
-			 version.type,
-			 version.platform,
-			 version.generation);
 	}
 
 	platform_set_drvdata(pdev, epiphany);
