@@ -1352,30 +1352,11 @@ static char *epiphany_devnode(struct device *dev, umode_t *mode)
 	return kasprintf(GFP_KERNEL, "epiphany/%s", dev_name(dev));
 }
 
-static int epiphany_probe(struct platform_device *pdev)
+static int epiphany_platform_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct epiphany_device *epiphany;
 	int retval;
-
-	/* TODO: Should go in init function */
-	epiphany_class = class_create(THIS_MODULE, "epiphany");
-	if (IS_ERR(epiphany_class)) {
-		pr_err("Unable to create Epiphany class\n");
-		retval = PTR_ERR(epiphany_class);
-		goto err_class;
-	}
-	epiphany_class->devnode = epiphany_devnode;
-
-	retval = alloc_chrdev_region(&epiphany_devt, 0, E_DEV_NUM_MINORS,
-				     "epiphany");
-	if (retval) {
-		pr_err("Failed allocating Epiphany major number: %i\n", retval);
-		retval = retval;
-		goto err_chrdev;
-	}
-	pr_devel("Epiphany device allocated, MAJOR %i\n", MAJOR(epiphany_devt));
-
 
 	epiphany = devm_kzalloc(dev, sizeof(*epiphany), GFP_KERNEL);
 	if (!epiphany)
@@ -1404,52 +1385,80 @@ static int epiphany_probe(struct platform_device *pdev)
 err_dt:
 	epiphany_cleanup(epiphany);
 
-err_chrdev:
-	epiphany_devt = MKDEV(MAJOR(0), MINOR(0));
-	class_destroy(epiphany_class);
-err_class:
-	epiphany_class = NULL;
-
 	return retval;
-
 }
 
-static int epiphany_remove(struct platform_device *pdev)
+static int epiphany_platform_remove(struct platform_device *pdev)
 {
 	struct epiphany_device *epiphany = platform_get_drvdata(pdev);
 
 	if (epiphany)
 		epiphany_cleanup(epiphany);
 
-	/* Should go into module exit ? */
+	dev_dbg(&epiphany->pdev->dev, "device removed\n");
+
+	return 0;
+}
+
+static const struct of_device_id epiphany_of_match[] = {
+	{ .compatible = "adapteva,epiphany" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, epiphany_of_match);
+
+static struct platform_driver epiphany_driver = {
+	.probe	= epiphany_platform_probe,
+	.remove	= epiphany_platform_remove,
+	.driver	= {
+		.name		= "epiphany",
+		.of_match_table	= of_match_ptr(epiphany_of_match),
+	}
+};
+
+static int __init epiphany_module_init(void)
+{
+	int retval;
+
+	epiphany_class = class_create(THIS_MODULE, "epiphany");
+	if (IS_ERR(epiphany_class)) {
+		pr_err("Unable to create epiphany class\n");
+		retval = PTR_ERR(epiphany_class);
+		goto err_class;
+	}
+	epiphany_class->devnode = epiphany_devnode;
+
+	retval = alloc_chrdev_region(&epiphany_devt, 0, E_DEV_NUM_MINORS,
+				     "epiphany");
+	if (retval) {
+		pr_err("Failed allocating epiphany major number: %i\n", retval);
+		retval = retval;
+		goto err_chrdev;
+	}
+	pr_devel("epiphany device allocated, major %i\n", MAJOR(epiphany_devt));
+
+	return platform_driver_register(&epiphany_driver);
+
+err_chrdev:
+	class_destroy(epiphany_class);
+err_class:
+
+	return retval;
+}
+
+static void __exit epiphany_module_exit(void)
+{
+	platform_driver_unregister(&epiphany_driver);
+
 	if (epiphany_devt)
 		unregister_chrdev_region(epiphany_devt, E_DEV_NUM_MINORS);
 
 	if (epiphany_class)
 		class_destroy(epiphany_class);
 
-	dev_dbg(&epiphany->pdev->dev, "device removed\n");
-
-	return 0;
 }
 
-#ifdef CONFIG_OF
-static const struct of_device_id epiphany_of_match[] = {
-	{ .compatible = "adapteva,epiphany" },
-	{ }
-};
-MODULE_DEVICE_TABLE(of, epiphany_of_match);
-#endif
-
-static struct platform_driver epiphany_driver = {
-	.probe	= epiphany_probe,
-	.remove	= epiphany_remove,
-	.driver	= {
-		.name		= "epiphany",
-		.of_match_table	= of_match_ptr(epiphany_of_match),
-	}
-};
-module_platform_driver(epiphany_driver);
+module_init(epiphany_module_init);
+module_exit(epiphany_module_exit);
 
 MODULE_DESCRIPTION("Adapteva Epiphany driver");
 MODULE_VERSION("0.1");
