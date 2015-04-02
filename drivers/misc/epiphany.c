@@ -10,15 +10,26 @@
 #include <linux/io.h>
 #include <linux/mm.h>
 #include <linux/list.h>
-#include <linux/miscdevice.h>
 #include <linux/uaccess.h>
 #include <linux/mutex.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
+#include <linux/cdev.h>
 
 #include "epiphany.h"
 
 #define DRIVERNAME	"epiphany"
+
+#define E_DEV_NUM_MINORS	MINORMASK	/* Total to reserve */
+
+static dev_t epiphany_devt;
+
+static struct class *epiphany_class;
+
+static DEFINE_IDR(epiphany_minor_idr);
+
+/* One big lock for everything */
+static DEFINE_MUTEX(driver_lock);
 
 #define COREID_SHIFT 20
 
@@ -26,8 +37,6 @@
 #define COORDS(row, col) ((row) * 64 | (col))
 #define ROW(coreid) ((coreid) / 64)
 #define COL(coreid) ((coreid) % 64)
-
-static DEFINE_MUTEX(driver_lock);
 
 enum elink_side {
 	E_SIDE_N = 0,
@@ -170,8 +179,9 @@ struct elink {
 	struct connection connection;
 
 	/* TODO: Have our own cdev */
-	struct miscdevice misc;
-	bool misc_registered;
+	struct device *char_dev;
+	struct cdev cdev;
+	int minor;
 
 	phandle phandle;
 };
@@ -254,7 +264,7 @@ static inline u32 reg_read(void __iomem *base, u32 offset)
 
 static inline struct elink *file_to_elink(struct file *file)
 {
-	return container_of(file->private_data, struct elink, misc);
+	return container_of(file->private_data, struct elink, cdev);
 }
 
 static int coreid_to_phys(struct elink *elink, u16 coreid, phys_addr_t *out)
@@ -690,6 +700,8 @@ static int elink_char_open(struct inode *inode, struct file *file)
 	struct elink *elink;
 	struct epiphany_device *epiphany;
 
+	file->private_data = inode->i_cdev;
+
 	elink = file_to_elink(file);
 	epiphany = elink->epiphany;
 
@@ -1091,6 +1103,77 @@ static int dt_probe_elink_clks(struct epiphany_device *epiphany,
 	return retval;
 }
 
+static int minor_get(void *ptr)
+{
+	int retval;
+
+	mutex_lock(&driver_lock);
+	retval = idr_alloc(&epiphany_minor_idr, ptr, 0, E_DEV_NUM_MINORS,
+			   GFP_KERNEL);
+	mutex_unlock(&driver_lock);
+	return retval;
+}
+
+static void minor_put(int minor)
+{
+	mutex_lock(&driver_lock);
+	idr_remove(&epiphany_minor_idr, minor);
+	mutex_unlock(&driver_lock);
+}
+
+static int elink_register(struct elink *elink)
+{
+	struct device *epiphany_dev = &elink->epiphany->pdev->dev;
+	int err, retval;
+	dev_t devt;
+
+	retval = minor_get(elink);
+	if (retval < 0)
+		return retval;
+
+	elink->minor = retval;
+	devt = MKDEV(MAJOR(epiphany_devt), elink->minor);
+	cdev_init(&elink->cdev, &elink_char_driver_ops);
+	elink->cdev.owner = THIS_MODULE;
+
+	err = cdev_add(&elink->cdev, devt, 1);
+	if (err) {
+		dev_err(epiphany_dev,
+			"CHAR registration failed for elink driver\n");
+		goto err_cdev_add;
+	}
+
+	elink->char_dev = device_create(epiphany_class, epiphany_dev,
+					devt, elink, "elink%d", elink->minor);
+
+	if (IS_ERR(elink->char_dev)) {
+		dev_err(epiphany_dev, "unable to create device %d:%d\n",
+			MAJOR(devt), MINOR(devt));
+		err = PTR_ERR(elink->char_dev);
+		goto err_dev_create;
+	}
+
+	dev_dbg(epiphany_dev, "elink_register: registered device\n");
+	return 0;
+
+err_dev_create:
+	cdev_del(&elink->cdev);
+err_cdev_add:
+	minor_put(elink->minor);
+
+	return err;
+}
+void elink_deregister(struct elink *elink)
+{
+	dev_t devt = elink->cdev.dev;
+
+	cdev_del(&elink->cdev);
+
+	device_destroy(epiphany_class, devt);
+
+	minor_put(MINOR(devt));
+}
+
 static int dt_probe_elink(struct epiphany_device *epiphany,
 			  struct device_node *np)
 {
@@ -1193,21 +1276,7 @@ static int dt_probe_elink(struct epiphany_device *epiphany,
 	elink->connection.type = E_CONN_ARRAY;
 	elink->connection.side = side;
 
-	/* Char dev registration: TODO: Don't use miscdevice */
-	elink->misc.minor = MISC_DYNAMIC_MINOR;
-	elink->misc.name = "elink0"; /* TODO: Pull seqnum from minor */
-	elink->misc.fops = &elink_char_driver_ops;
-
-	err = misc_register(&elink->misc);
-	if (err) {
-		dev_warn(dev, "CHAR registration failed for elink driver\n");
-		return err;
-	}
-	elink->misc_registered = true;
-
-	dev_dbg(dev, "elink: successfully added elink\n");
-
-	return 0;
+	return elink_register(elink);
 }
 
 static int dt_probe_elinks(struct epiphany_device *epiphany)
@@ -1253,9 +1322,9 @@ static void epiphany_cleanup(struct epiphany_device *epiphany)
 	struct clk **clk;
 
 	list_for_each_entry(elink, &epiphany->elink_list, list) {
-		if (elink->misc_registered) {
-			misc_deregister(&elink->misc);
-			elink->misc_registered = false;
+		if (elink->minor >= 0) {
+			elink_deregister(elink);
+			elink->minor = -ENOENT;
 		}
 	}
 
@@ -1269,6 +1338,11 @@ static void epiphany_cleanup(struct epiphany_device *epiphany)
 	/* Everything else is allocated with devm_* */
 }
 
+static char *epiphany_devnode(struct device *dev, umode_t *mode)
+{
+	return kasprintf(GFP_KERNEL, "epiphany/%s", dev_name(dev));
+}
+
 static int epiphany_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1276,6 +1350,25 @@ static int epiphany_probe(struct platform_device *pdev)
 	struct elink *elink;
 	union e_syscfg_version version;
 	int retval;
+
+	/* TODO: Should go in init function */
+	epiphany_class = class_create(THIS_MODULE, "epiphany");
+	if (IS_ERR(epiphany_class)) {
+		pr_err("Unable to create Epiphany class\n");
+		retval = PTR_ERR(epiphany_class);
+		goto err_class;
+	}
+	epiphany_class->devnode = epiphany_devnode;
+
+	retval = alloc_chrdev_region(&epiphany_devt, 0, E_DEV_NUM_MINORS,
+				     "epiphany");
+	if (retval) {
+		pr_err("Failed allocating Epiphany major number: %i\n", retval);
+		retval = retval;
+		goto err_chrdev;
+	}
+	pr_devel("Epiphany device allocated, MAJOR %i\n", MAJOR(epiphany_devt));
+
 
 	epiphany = devm_kzalloc(dev, sizeof(*epiphany), GFP_KERNEL);
 	if (!epiphany)
@@ -1294,11 +1387,8 @@ static int epiphany_probe(struct platform_device *pdev)
 		else
 			dev_warn(dev, "Failed parsing device tree\n");
 
-		epiphany_cleanup(epiphany);
-		return retval;
+		goto err_dt;
 	}
-
-	platform_set_drvdata(pdev, epiphany);
 
 	list_for_each_entry(elink, &epiphany->elink_list, list) {
 		dev_info(dev, "Epiphany FPGA elink at address %pa\n",
@@ -1312,14 +1402,36 @@ static int epiphany_probe(struct platform_device *pdev)
 			 version.generation);
 	}
 
+	platform_set_drvdata(pdev, epiphany);
+
 	return 0;
+
+err_dt:
+	epiphany_cleanup(epiphany);
+
+err_chrdev:
+	epiphany_devt = MKDEV(MAJOR(0), MINOR(0));
+	class_destroy(epiphany_class);
+err_class:
+	epiphany_class = NULL;
+
+	return retval;
+
 }
 
 static int epiphany_remove(struct platform_device *pdev)
 {
 	struct epiphany_device *epiphany = platform_get_drvdata(pdev);
 
-	epiphany_cleanup(epiphany);
+	if (epiphany)
+		epiphany_cleanup(epiphany);
+
+	/* Should go into module exit ? */
+	if (epiphany_devt)
+		unregister_chrdev_region(epiphany_devt, E_DEV_NUM_MINORS);
+
+	if (epiphany_class)
+		class_destroy(epiphany_class);
 
 	dev_dbg(&epiphany->pdev->dev, "device removed\n");
 
