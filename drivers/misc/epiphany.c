@@ -1000,7 +1000,11 @@ err_clks:
 
 void elink_deregister(struct elink *elink)
 {
-	dev_t devt = elink->cdev.dev;
+	dev_t devt;
+
+	list_del(&elink->list);
+
+	devt = elink->cdev.dev;
 
 	cdev_del(&elink->cdev);
 
@@ -1439,9 +1443,9 @@ static int epiphany_platform_probe(struct platform_device *pdev)
 static int epiphany_platform_remove(struct platform_device *pdev)
 {
 	struct epiphany_device *epiphany = platform_get_drvdata(pdev);
-	struct elink *elink;
+	struct elink *elink, *next;
 
-	list_for_each_entry(elink, &epiphany->elink_list, list)
+	list_for_each_entry_safe(elink, next, &epiphany->elink_list, list)
 		elink_deregister(elink);
 
 	dev_dbg(&epiphany->pdev->dev, "device removed\n");
