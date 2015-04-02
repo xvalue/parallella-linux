@@ -27,6 +27,8 @@ static dev_t epiphany_devt;
 static struct class *epiphany_class;
 
 static DEFINE_IDR(epiphany_minor_idr);
+/* Used by minor_get() / minor_put() */
+static DEFINE_MUTEX(epiphany_minor_idr_lock);
 
 /* One big lock for everything */
 static DEFINE_MUTEX(driver_lock);
@@ -882,18 +884,18 @@ static int minor_get(void *ptr)
 {
 	int retval;
 
-	mutex_lock(&driver_lock);
+	mutex_lock(&epiphany_minor_idr_lock);
 	retval = idr_alloc(&epiphany_minor_idr, ptr, 0, E_DEV_NUM_MINORS,
 			   GFP_KERNEL);
-	mutex_unlock(&driver_lock);
+	mutex_unlock(&epiphany_minor_idr_lock);
 	return retval;
 }
 
 static void minor_put(int minor)
 {
-	mutex_lock(&driver_lock);
+	mutex_lock(&epiphany_minor_idr_lock);
 	idr_remove(&epiphany_minor_idr, minor);
-	mutex_unlock(&driver_lock);
+	mutex_unlock(&epiphany_minor_idr_lock);
 }
 
 static const struct file_operations elink_char_driver_ops = {
