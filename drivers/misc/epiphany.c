@@ -12,6 +12,7 @@
 #include <linux/list.h>
 #include <linux/uaccess.h>
 #include <linux/mutex.h>
+#include <linux/spinlock.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/cdev.h>
@@ -32,7 +33,7 @@ static struct epiphany_device *epiphany_device;
 
 static DEFINE_IDR(epiphany_minor_idr);
 /* Used by minor_get() / minor_put() */
-static DEFINE_MUTEX(epiphany_minor_idr_lock);
+static DEFINE_SPINLOCK(epiphany_minor_idr_lock);
 
 /* One big lock for everything */
 static DEFINE_MUTEX(driver_lock);
@@ -880,18 +881,20 @@ static int minor_get(void *ptr)
 {
 	int retval;
 
-	mutex_lock(&epiphany_minor_idr_lock);
+	idr_preload(GFP_KERNEL);
+	spin_lock(&epiphany_minor_idr_lock);
 	retval = idr_alloc(&epiphany_minor_idr, ptr, 0, E_DEV_NUM_MINORS,
-			   GFP_KERNEL);
-	mutex_unlock(&epiphany_minor_idr_lock);
+			   GFP_NOWAIT);
+	spin_unlock(&epiphany_minor_idr_lock);
+	idr_preload_end();
 	return retval;
 }
 
 static void minor_put(int minor)
 {
-	mutex_lock(&epiphany_minor_idr_lock);
+	spin_lock(&epiphany_minor_idr_lock);
 	idr_remove(&epiphany_minor_idr, minor);
-	mutex_unlock(&epiphany_minor_idr_lock);
+	spin_unlock(&epiphany_minor_idr_lock);
 }
 
 static const struct file_operations elink_char_driver_ops = {
