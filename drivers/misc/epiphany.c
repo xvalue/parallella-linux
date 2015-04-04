@@ -202,7 +202,6 @@ struct chip_array {
 
 	struct connection connections[E_SIDE_MAX];
 
-	/* TODO: Support more than one regulator */
 	struct regulator *supply;
 	int vdd_wanted;
 
@@ -249,6 +248,7 @@ static inline struct device_node
 	for (dn = get_next_compatible_child(parent, NULL, compat); \
 	     dn != NULL; \
 	     dn = get_next_compatible_child(parent, dn, compat))
+
 
 /* TODO: Sledge-hammer approach. Needed on some Kickstarter boards. Ultimately
  * these long sleeps should only be needed when modifying clocks. */
@@ -943,6 +943,138 @@ static void elink_clks_put(struct elink_device *elink)
 		clk_disable_unprepare(elink->clocks[i]);
 }
 
+
+ssize_t elink_attr_vdd_current_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	int ret = 0, vdd_curr;
+	struct elink_device *elink = dev_get_drvdata(dev);
+
+	if (mutex_lock_interruptible(&driver_lock))
+		return -ERESTARTSYS;
+
+	if (elink->connection.type != E_CONN_ARRAY ||
+	    !elink->connection.array->supply) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	vdd_curr = regulator_get_voltage(elink->connection.array->supply);
+	if (vdd_curr < 0) {
+		ret = vdd_curr;
+		goto out;
+	}
+
+	ret = sprintf(buf, "%d\n", vdd_curr);
+
+out:
+	mutex_unlock(&driver_lock);
+	return ret;
+}
+
+ssize_t elink_attr_vdd_wanted_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	int ret = 0;
+	struct elink_device *elink = dev_get_drvdata(dev);
+
+	if (mutex_lock_interruptible(&driver_lock))
+		return -ERESTARTSYS;
+
+	if (elink->connection.type != E_CONN_ARRAY ||
+	    !elink->connection.array->supply) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	ret = sprintf(buf, "%d\n", elink->connection.array->vdd_wanted);
+
+out:
+	mutex_unlock(&driver_lock);
+	return ret;
+}
+
+/* Must hold driver lock before calling this function */
+static int elink_set_vdd_wanted(struct elink_device *elink, int vdd)
+{
+	struct chip_array *array;
+	const struct epiphany_chip_info *cinfo;
+	unsigned int step;
+
+	if (elink->connection.type != E_CONN_ARRAY)
+		return -ENODEV;
+
+	array = elink->connection.array;
+	cinfo = &epiphany_chip_info[elink->connection.array->chip_type];
+
+	/* Zero or below resets to default vdd */
+	if (vdd <= 0) {
+		array->vdd_wanted = cinfo->vdd_default;
+		return 0;
+	}
+
+	if (!array->supply)
+		return -ENODEV;
+
+	/* Round vdd down to closest step */
+	step = regulator_get_linear_step(array->supply);
+	vdd = vdd - vdd % step;
+
+	if (vdd < cinfo->vdd_min || cinfo->vdd_max < vdd)
+		return -ERANGE;
+
+	array->vdd_wanted = vdd;
+
+	return 0;
+}
+
+static ssize_t elink_attr_vdd_wanted_store(struct device *dev,
+					   struct device_attribute *attr,
+					   const char *buf,
+					   size_t len)
+{
+	struct elink_device *elink = dev_get_drvdata(dev);
+	int ret, data;
+
+	ret = kstrtoint(buf, 10, &data);
+	if (ret < 0)
+		return ret;
+
+	if (mutex_lock_interruptible(&driver_lock))
+		return -ERESTARTSYS;
+
+	ret = elink_set_vdd_wanted(elink, data);
+	if (!ret)
+		ret = len;
+
+	mutex_unlock(&driver_lock);
+	return ret;
+}
+
+#define DEVICE_ATTR_PFX(_pfx, _name, _mode, _show, _store) \
+	struct device_attribute dev_attr_##_pfx##_##_name = \
+		__ATTR(_name, _mode, _show, _store)
+
+static DEVICE_ATTR_PFX(elink, vdd_current, 0644, elink_attr_vdd_current_show,
+		       NULL);
+static DEVICE_ATTR_PFX(elink, vdd_wanted, 0644, elink_attr_vdd_wanted_show,
+		       elink_attr_vdd_wanted_store);
+
+static struct attribute *dev_attrs_elink[] = {
+	&dev_attr_elink_vdd_current.attr,
+	&dev_attr_elink_vdd_wanted.attr,
+	NULL
+};
+
+static struct attribute_group dev_attr_group_elink = {
+	.attrs = dev_attrs_elink
+};
+
+static const struct attribute_group *dev_attr_groups_elink[] = {
+	&dev_attr_group_elink,
+	NULL
+};
+
 /* ??? TODO: Rename to elink_register_chardev ? */
 static int elink_register(struct elink_device *elink)
 {
@@ -969,8 +1101,10 @@ static int elink_register(struct elink_device *elink)
 		goto err_cdev_add;
 	}
 
-	elink->char_dev = device_create(epiphany_class, elink->dev,
-					devt, elink, "elink%d", elink->minor);
+	elink->char_dev =
+		device_create_with_groups(epiphany_class, elink->dev, devt,
+					  elink, dev_attr_groups_elink,
+					  "elink%d", elink->minor);
 
 	if (IS_ERR(elink->char_dev)) {
 		dev_err(elink->dev, "unable to create device %d:%d\n",
