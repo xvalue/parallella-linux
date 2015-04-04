@@ -204,6 +204,7 @@ struct chip_array {
 
 	/* TODO: Support more than one regulator */
 	struct regulator *supply;
+	int vdd_wanted;
 
 	phandle phandle;
 };
@@ -637,27 +638,21 @@ static void disable_elink(struct elink_device *elink)
 
 static int epiphany_regulator_enable(struct chip_array *array)
 {
-	int err, curr_vdd;
-	bool safe;
+	int ret;
 	const struct epiphany_chip_info *cinfo =
 		&epiphany_chip_info[array->chip_type];
 
 	if (!array->supply)
 		return 0;
 
-	curr_vdd = regulator_get_voltage(array->supply);
+	ret = regulator_set_voltage(array->supply, array->vdd_wanted,
+				    cinfo->vdd_max);
+	if (ret)
+		return ret;
 
-	safe = cinfo->vdd_min <= curr_vdd && curr_vdd <= cinfo->vdd_max;
-	if (!safe) {
-		err = regulator_set_voltage(array->supply, cinfo->vdd_default,
-					    cinfo->vdd_max);
-		if (err)
-			return err;
-	}
-
-	err = regulator_enable(array->supply);
-	if (err)
-		return err;
+	ret = regulator_enable(array->supply);
+	if (ret)
+		return ret;
 
 	return 0;
 }
@@ -1028,6 +1023,8 @@ static struct chip_array *elink_of_probe_chip_array(struct elink_device *elink,
 	struct device_node *supply_node;
 	struct chip_array *array;
 	struct regulator *supply;
+	const struct epiphany_chip_info *cinfo =
+		&epiphany_chip_info[elink->chip_type];
 	enum elink_side side;
 	u32 reg[4];
 	int err;
@@ -1072,6 +1069,8 @@ static struct chip_array *elink_of_probe_chip_array(struct elink_device *elink,
 			 "arrays: no supply node specified, no power management.\n");
 		goto no_supply_node;
 	}
+
+	array->vdd_wanted = cinfo->vdd_default;
 
 	err = of_property_read_string(supply_node, "regulator-name",
 				      &supply_name);
