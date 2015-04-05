@@ -202,6 +202,8 @@ struct array_device {
 	unsigned int chip_cols;
 	enum e_chip_type chip_type;
 
+	enum elink_side parent_side; /* Side of array array is connected to to
+					parent elink */
 	struct connection connections[E_SIDE_MAX];
 
 	struct regulator *supply;
@@ -1037,12 +1039,20 @@ static void array_device_release(struct device *dev)
 	/* No-op since we use devm_* */
 }
 
-static int array_register(struct array_device *array, struct device *parent)
+static int array_register(struct array_device *array,
+			  struct elink_device *elink)
 {
 	int ret;
+	const struct epiphany_chip_info *cinfo =
+		&epiphany_chip_info[elink->chip_type];
+
+	array->chip_type = elink->chip_type;
+	array->vdd_wanted = cinfo->vdd_default;
+	array->connections[array->parent_side].type = E_CONN_ELINK;
+	array->connections[array->parent_side].elink = elink;
 
 	array->dev.class = epiphany_class;
-	array->dev.parent = parent;
+	array->dev.parent = elink->char_dev;
 	array->dev.groups = dev_attr_groups_array;
 	array->dev.release = array_device_release;
 	/* There can only be one array per elink, no name conflicts */
@@ -1051,11 +1061,27 @@ static int array_register(struct array_device *array, struct device *parent)
 
 	ret = device_register(&array->dev);
 	if (ret) {
-		dev_err(parent, "unable to create device array device\n");
+		dev_err(elink->char_dev, "unable to create device array device\n");
 		goto err_dev_create;
 	}
 
 	mutex_lock(&driver_lock);
+	/* TODO: roll back if elink is not disconnected */
+	WARN_ON(elink->connection.type != E_CONN_DISCONNECTED);
+	if (elink->quirk_coreid_is_noop && array->id != 0x808) {
+		dev_warn(&array->dev,
+			 "arrays: non default id and elink coreid is no-op\n");
+	}
+
+	if (elink->coreid_pinout == -1) {
+		dev_dbg(&array->dev,
+			"arrays: setting elink coreid to array id 0x%03x\n",
+			array->id);
+		elink->coreid_pinout = array->id;
+	}
+	elink->connection.type = E_CONN_ARRAY;
+	elink->connection.array = array;
+	elink->connection.side = array->parent_side;
 	list_add_tail(&array->list, &epiphany_device->chip_array_list);
 	mutex_unlock(&driver_lock);
 
@@ -1068,40 +1094,45 @@ err_dev_create:
 
 static void array_unregister(struct array_device *array)
 {
+	struct elink_device *elink = dev_get_drvdata(array->dev.parent);
+
+	WARN_ON(!elink);
+
 	mutex_lock(&driver_lock);
 	list_del(&array->list);
+	if (elink) {
+		elink->connection.type = E_CONN_DISCONNECTED;
+		elink->connection.array = NULL;
+	}
 	mutex_unlock(&driver_lock);
 
 	device_unregister(&array->dev);
 }
 
-
-static struct array_device
-*elink_of_probe_chip_array(struct elink_device *elink,
-			   struct device_node *np,
-			   enum elink_side *out_side)
+static struct array_device *array_of_probe(struct platform_device *pdev)
 {
-	struct device_node *supply_node;
+	struct platform_device *ppdev =
+		to_platform_device(pdev->dev.parent);
+	struct elink_device *elink = platform_get_drvdata(ppdev);
 	struct array_device *array;
+	struct device_node *supply_node;
 	struct regulator *supply;
-	const struct epiphany_chip_info *cinfo =
-		&epiphany_chip_info[elink->chip_type];
 	enum elink_side side;
 	u32 reg[4];
-	int err;
+	int ret;
 	const char *supply_name;
 
-	array = devm_kzalloc(elink->dev, sizeof(*array), GFP_KERNEL);
+	array = devm_kzalloc(&pdev->dev, sizeof(*array), GFP_KERNEL);
 	if (!array)
 		return ERR_PTR(-ENOMEM);
 
-	array->phandle = np->phandle;
+	array->phandle = pdev->dev.of_node->phandle;
 
 	/* There is probably a better way for doing this */
-	err = of_property_read_u32_array(np, "reg", reg, 4);
-	if (err) {
-		dev_err(elink->dev, "arrays: invalid reg property\n");
-		return ERR_PTR(err);
+	ret = of_property_read_u32_array(pdev->dev.of_node, "reg", reg, 4);
+	if (ret) {
+		dev_err(&pdev->dev, "arrays: invalid reg property\n");
+		return ERR_PTR(ret);
 	}
 
 	array->id = (u16) reg[0];
@@ -1109,74 +1140,110 @@ static struct array_device
 	array->chip_rows = reg[2];
 	array->chip_cols = reg[3];
 
-	if (elink->quirk_coreid_is_noop && array->id != 0x808) {
-		dev_warn(elink->dev,
-			 "arrays: non default id and elink coreid is no-op\n");
-	}
-
-	if (elink->coreid_pinout == -1) {
-		dev_dbg(elink->dev,
-			"arrays: setting elink coreid to array id 0x%03x\n",
-			array->id);
-		elink->coreid_pinout = array->id;
-	}
-
-	array->chip_type = elink->chip_type;
-
 	/* TODO: Support more than one regulator per array */
-	supply_node = of_parse_phandle(np, "vdd-supply", 0);
+	supply_node = of_parse_phandle(pdev->dev.of_node, "vdd-supply", 0);
 	if (!supply_node) {
-		dev_warn(elink->dev,
+		dev_warn(&pdev->dev,
 			 "arrays: no supply node specified, no power management.\n");
 		goto no_supply_node;
 	}
 
-	array->vdd_wanted = cinfo->vdd_default;
-
-	err = of_property_read_string(supply_node, "regulator-name",
+	ret = of_property_read_string(supply_node, "regulator-name",
 				      &supply_name);
-	if (err) {
-		dev_info(elink->dev, "arrays: no regulator name\n");
+	if (ret) {
+		dev_info(&pdev->dev, "arrays: no regulator name\n");
 		of_node_put(supply_node);
-		return ERR_PTR(err);
+		return ERR_PTR(ret);
 	}
 
-	supply = devm_regulator_get(elink->dev, supply_name);
+	supply = devm_regulator_get(&pdev->dev, supply_name);
 	if (IS_ERR(supply)) {
-		if (PTR_ERR(supply) == -EPROBE_DEFER) {
-			dev_info(elink->dev,
+		ret = PTR_ERR(supply);
+		if (ret == -EPROBE_DEFER) {
+			dev_info(&pdev->dev,
 				 "arrays: %s regulator not ready, retry\n",
-				 np->name);
+				 supply_node->name);
 		} else {
-			dev_info(elink->dev, "arrays: no regulator %s: %ld\n",
-				 np->name, PTR_ERR(supply));
+			dev_info(&pdev->dev, "arrays: no regulator %s: %d\n",
+				 supply_node->name, ret);
 		}
 		of_node_put(supply_node);
-		return ERR_PTR(PTR_ERR(supply));
+		return ERR_PTR(ret);
 	}
 
 	of_node_put(supply_node);
 	array->supply = supply;
 
 no_supply_node:
-
 	switch (side) {
 	case E_SIDE_N ... E_SIDE_W:
-		array->connections[side].type = E_CONN_ELINK;
-		array->connections[side].elink = elink;
-		dev_dbg(elink->dev, "arrays: added connection\n");
+		array->parent_side = side;
 		break;
 
 	default:
-		dev_err(elink->dev, "Invalid side %u\n", (u32) side);
+		dev_err(&pdev->dev, "Invalid side %u\n", (u32) side);
 		return ERR_PTR(-EINVAL);
 	}
 
-	/* TODO: Parse other connections */
+	ret = array_register(array, elink);
+	if (ret)
+		return ERR_PTR(ret);
 
-	*out_side = side;
+	dev_dbg(&pdev->dev, "arrays: added connection\n");
 	return array;
 }
+
+static int array_platform_probe(struct platform_device *pdev)
+{
+	struct array_device *array;
+	int ret;
+
+	array = devm_kzalloc(&pdev->dev, sizeof(*array), GFP_KERNEL);
+	if (!array)
+		return -ENOMEM;
+
+	array = array_of_probe(pdev);
+	if (IS_ERR(array)) {
+		ret = PTR_ERR(array);
+		if (ret == -EPROBE_DEFER)
+			dev_info(&pdev->dev, "Deferring probe.\n");
+		else
+			dev_warn(&pdev->dev, "Failed parsing device tree\n");
+
+		return ret;
+	}
+
+	platform_set_drvdata(pdev, array);
+
+	return 0;
+}
+
+static int array_platform_remove(struct platform_device *pdev)
+{
+	struct array_device *array = platform_get_drvdata(pdev);
+
+	array_unregister(array);
+
+	dev_dbg(&pdev->dev, "device removed\n");
+
+	return 0;
+}
+
+static const struct of_device_id array_of_match[] = {
+	{ .compatible = "adapteva,chip-array" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, array_of_match);
+
+static struct platform_driver array_driver = {
+	.probe	= array_platform_probe,
+	.remove	= array_platform_remove,
+	.driver	= {
+		.name		= "array",
+		.of_match_table	= of_match_ptr(array_of_match)
+	}
+};
+
 
 /* Place holder */
 static const struct attribute_group *dev_attr_groups_elink[] = {
@@ -1395,8 +1462,6 @@ static int elink_of_probe(struct elink_device *elink)
 {
 	struct platform_device *pdev = to_platform_device(elink->dev);
 	struct resource res;
-	struct device_node *array_np;
-	enum elink_side side = -1;
 	u16 coreid;
 	int ret;
 
@@ -1468,42 +1533,13 @@ static int elink_of_probe(struct elink_device *elink)
 	if (ret)
 		return ret;
 
-	/* Only support array connections for now */
-	/* (and we will always only support 1 connection/elink) */
-	array_np = get_next_compatible_child(elink->dev->of_node, NULL,
-					     "adapteva,chip-array");
-	if (!array_np) {
-		dev_info(elink->dev, "elink has no connections\n");
-		return 0;
-	}
-
-	elink->connection.array = elink_of_probe_chip_array(elink, array_np,
-							    &side);
-	if (IS_ERR(elink->connection.array)) {
-		ret = PTR_ERR(elink->connection.array);
-		elink->connection.array = NULL;
-		return ret;
-	}
-	elink->connection.type = E_CONN_ARRAY;
-	elink->connection.side = side;
-
 	ret = elink_register(elink);
 	if (ret)
 		return ret;
 
-	ret = array_register(elink->connection.array, elink->char_dev);
-	if (ret) {
-		dev_err(elink->dev, "Failed registering array dev\n");
-		goto err_array_register;
-	}
-
 	list_add_tail(&elink->list, &epiphany_device->elink_list);
 
 	return 0;
-
-err_array_register:
-	elink_unregister(elink);
-	return ret;
 }
 
 static int elink_platform_probe(struct platform_device *pdev)
@@ -1717,9 +1753,19 @@ static int __init epiphany_module_init(void)
 		goto err_register_elink;
 	}
 
+	ret = platform_driver_register(&array_driver);
+	if (ret) {
+		pr_err("Failed to register elink platform driver\n");
+		goto err_register_array;
+	}
+
+
 	return 0;
 
+err_register_array:
+	platform_driver_unregister(&elink_driver);
 err_register_elink:
+	platform_driver_unregister(&epiphany_driver);
 err_register_epiphany:
 	unregister_chrdev_region(epiphany_devt, E_DEV_NUM_MINORS);
 err_chrdev:
@@ -1733,6 +1779,7 @@ module_init(epiphany_module_init);
 
 static void __exit epiphany_module_exit(void)
 {
+	platform_driver_unregister(&array_driver);
 	platform_driver_unregister(&elink_driver);
 	platform_driver_unregister(&epiphany_driver);
 	unregister_chrdev_region(epiphany_devt, E_DEV_NUM_MINORS);
