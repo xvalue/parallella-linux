@@ -91,7 +91,7 @@
 	memory-region = <&emem>;
 
 	elink0: elink0@70000000 {
-		compatible = "adapteva,elink";
+		compatible = "adapteva,elink", "simple-bus";
 
 		clocks = <&clkc 15>, <&clkc 16>, <&clkc 17>, <&clkc 18>;
 		clock-names = "fclk0", "fclk1", "fclk2", "fclk3";
