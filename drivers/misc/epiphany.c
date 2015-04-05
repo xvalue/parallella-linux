@@ -1737,6 +1737,11 @@ static void __exit epiphany_module_exit(void)
 	platform_driver_unregister(&epiphany_driver);
 	unregister_chrdev_region(epiphany_devt, E_DEV_NUM_MINORS);
 	class_destroy(epiphany_class);
+
+	WARN_ON(!list_empty(&epiphany_device->chip_array_list));
+	WARN_ON(!list_empty(&epiphany_device->elink_list));
+	WARN_ON(!list_empty(&epiphany_device->mem_region_list));
+
 	kfree(epiphany_device);
 }
 module_exit(epiphany_module_exit);
