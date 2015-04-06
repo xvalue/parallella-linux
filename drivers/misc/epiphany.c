@@ -163,7 +163,7 @@ struct connection {
 
 struct elink_device {
 	struct list_head list;
-	struct device *dev;
+	struct device dev;
 
 	void __iomem *regs;
 	phys_addr_t regs_start;
@@ -185,7 +185,6 @@ struct elink_device {
 	struct connection connection;
 
 	/* TODO: Have our own cdev */
-	struct device *char_dev;
 	struct cdev cdev;
 	int minor;
 
@@ -278,6 +277,11 @@ static inline struct elink_device *file_to_elink(struct file *file)
 	return container_of(file->private_data, struct elink_device, cdev);
 }
 
+static inline struct elink_device *device_to_elink(struct device *dev)
+{
+	return container_of(dev, struct elink_device, dev);
+}
+
 static inline struct array_device *device_to_array(struct device *dev)
 {
 	return container_of(dev, struct array_device, dev);
@@ -339,7 +343,7 @@ static void elink_disable_chip_elink(struct elink_device *elink,
 
 	coreid = chipid + cinfo->elink_coreid[side];
 
-	dev_dbg(elink->dev,
+	dev_dbg(&elink->dev,
 		"Disabling elink 0x%03x (%02u, %02u) in array 0x%03x.\n",
 		coreid, ROW(coreid), COL(coreid), array->id);
 
@@ -483,7 +487,7 @@ static int configure_chip_tx_divider(struct elink_device *elink,
 
 	coreid = chipid + cinfo->elink_coreid[side];
 
-	dev_dbg(elink->dev,
+	dev_dbg(&elink->dev,
 		"chip requires programming the link clock divider.\n");
 
 	txcfg.reg = reg_read(elink->regs, E_SYS_CFGTX);
@@ -822,7 +826,7 @@ static int elink_char_mmap(struct file *file, struct vm_area_struct *vma)
 			return epiphany_map_memory(vma, false);
 	}
 
-	dev_dbg(elink->dev,
+	dev_dbg(&elink->dev,
 		"elink_char_mmap: invalid request to map 0x%08lx, length 0x%08lx bytes\n",
 		off, size);
 
@@ -1052,16 +1056,15 @@ static int array_register(struct array_device *array,
 	array->connections[array->parent_side].elink = elink;
 
 	array->dev.class = epiphany_class;
-	array->dev.parent = elink->char_dev;
+	array->dev.parent = &elink->dev;
 	array->dev.groups = dev_attr_groups_array;
 	array->dev.release = array_device_release;
 	/* There can only be one array per elink, no name conflicts */
 	dev_set_name(&array->dev, "array");
-	dev_set_drvdata(&array->dev, array);
 
 	ret = device_register(&array->dev);
 	if (ret) {
-		dev_err(elink->char_dev, "unable to create device array device\n");
+		dev_err(&array->dev, "unable to create device array device\n");
 		goto err_dev_create;
 	}
 
@@ -1094,7 +1097,7 @@ err_dev_create:
 
 static void array_unregister(struct array_device *array)
 {
-	struct elink_device *elink = dev_get_drvdata(array->dev.parent);
+	struct elink_device *elink = device_to_elink(array->dev.parent);
 
 	WARN_ON(!elink);
 
@@ -1268,8 +1271,7 @@ static int elink_clks_get(struct elink_device *elink)
 	return 0;
 
 err:
-	dev_err(elink->dev,
-		"elink_clks_get: failed clk=%d, err=%d\n", i, ret);
+	dev_err(&elink->dev, "elink_clks_get: failed clk=%d, err=%d\n", i, ret);
 
 	for (i--; i >= 0; i--)
 		clk_disable_unprepare(elink->clocks[i]);
@@ -1293,7 +1295,55 @@ static void elink_clks_put(struct elink_device *elink)
 		clk_disable_unprepare(elink->clocks[i]);
 }
 
-/* ??? TODO: Rename to elink_register_chardev ? */
+static int elink_probe(struct elink_device *elink)
+{
+	union e_syscfg_version version;
+	int ret = 0;
+
+	version.reg = reg_read(elink->regs, E_SYS_VERSION);
+
+	if (!version.generation || version.generation >= E_GEN_MAX) {
+		dev_err(&elink->dev, "elink: unsupported generation: 0x%x.\n",
+			version.generation);
+		ret = -EINVAL;
+		goto err_generation;
+	}
+
+	if (!version.platform || version.platform >= E_PLATF_MAX) {
+		dev_err(&elink->dev, "elink: unsupported platform: 0x%x.\n",
+			version.platform);
+		ret = -EINVAL;
+		goto err_platform;
+	}
+
+	/* setting coreid in fpga elink regs is a no-op with current
+	 * bitstreams. */
+	if (true) {
+		elink->quirk_coreid_is_noop = true;
+		elink->coreid_pinout = reg_read(elink->regs, E_SYS_COREID);
+		dev_dbg(&elink->dev,
+			"elinks: quirk: setting coreid reg is no-op\n");
+	}
+
+	elink->version = version;
+	elink->chip_type = elink_platform_chip_match[version.platform];
+
+	dev_info(&elink->dev, "Epiphany FPGA elink at address %pa\n",
+		 &elink->regs_start);
+	dev_info(&elink->dev,
+		 "revision %02x type %02x platform %02x generation %02x\n",
+		 version.revision,
+		 version.type,
+		 version.platform,
+		 version.generation);
+
+	return 0;
+
+err_platform:
+err_generation:
+	return ret;
+}
+
 static int elink_register(struct elink_device *elink)
 {
 	int ret;
@@ -1314,28 +1364,40 @@ static int elink_register(struct elink_device *elink)
 
 	ret = cdev_add(&elink->cdev, devt, 1);
 	if (ret) {
-		dev_err(elink->dev,
+		dev_err(&elink->dev,
 			"CHAR registration failed for elink driver\n");
 		goto err_cdev_add;
 	}
 
-	elink->char_dev =
-		device_create_with_groups(epiphany_class, NULL, devt,
-					  elink, dev_attr_groups_elink,
-					  "elink%d", elink->minor);
+	elink->dev.class = epiphany_class;
+	elink->dev.parent = NULL;
+	elink->dev.devt = devt;
+	elink->dev.groups = dev_attr_groups_elink;
+	elink->dev.release = array_device_release; /* TODO: Generic name */
+	dev_set_name(&elink->dev, "elink%d", elink->minor);
 
-	if (IS_ERR(elink->char_dev)) {
-		dev_err(elink->dev, "unable to create device %d:%d\n",
-			MAJOR(devt), MINOR(devt));
-		ret = PTR_ERR(elink->char_dev);
+	ret = elink_probe(elink);
+	if (ret) {
+		dev_err(&elink->dev, "probing failed\n");
+		goto err_probe;
+	}
+
+	ret = device_register(&elink->dev);
+	if (ret) {
+		dev_err(&elink->dev, "unable to create elink device\n");
 		goto err_dev_create;
 	}
 
-	dev_dbg(elink->char_dev, "elink_register: registered char device\n");
+	mutex_lock(&driver_lock);
+	list_add_tail(&elink->list, &epiphany_device->elink_list);
+	mutex_unlock(&driver_lock);
+
+	dev_dbg(&elink->dev, "elink_register: registered char device\n");
 	return 0;
 
 err_dev_create:
 	cdev_del(&elink->cdev);
+err_probe:
 err_cdev_add:
 	minor_put(elink->minor);
 err_minor:
@@ -1346,84 +1408,23 @@ err_clks:
 
 void elink_unregister(struct elink_device *elink)
 {
-	dev_t devt;
-
 	mutex_lock(&driver_lock);
 	list_del(&elink->list);
 	mutex_unlock(&driver_lock);
 
-	devt = elink->cdev.dev;
-
 	cdev_del(&elink->cdev);
 
-	device_destroy(epiphany_class, devt);
+	device_unregister(&elink->dev);
 
-	minor_put(MINOR(devt));
+	minor_put(elink->minor);
 
 	elink_clks_put(elink);
 
 	/* Everything else is allocated with devm_* */
-
 }
 
-
-static int probe_elink(struct elink_device *elink)
-{
-	union e_syscfg_version version;
-	int ret = 0;
-
-	/* Since we're still in the probing phase we need to get clocks
-	 * temporarily. */
-	ret = elink_clks_get(elink);
-	if (ret) {
-		dev_err(elink->dev, "elinks: Could not get clocks\n");
-		return ret;
-	}
-
-	version.reg = reg_read(elink->regs, E_SYS_VERSION);
-
-	if (!version.generation || version.generation >= E_GEN_MAX) {
-		dev_err(elink->dev, "elink: unsupported generation: 0x%x.\n",
-			version.generation);
-		ret = -EINVAL;
-		goto out_clks;
-	}
-
-	if (!version.platform || version.platform >= E_PLATF_MAX) {
-		dev_err(elink->dev, "elink: unsupported platform: 0x%x.\n",
-			version.platform);
-		ret = -EINVAL;
-		goto out_clks;
-	}
-
-	/* setting coreid in fpga elink regs is a no-op with current
-	 * bitstreams. */
-	if (true) {
-		elink->quirk_coreid_is_noop = true;
-		elink->coreid_pinout = reg_read(elink->regs, E_SYS_COREID);
-		dev_dbg(elink->dev,
-			"elinks: quirk: setting coreid reg is no-op\n");
-	}
-
-	elink->version = version;
-	elink->chip_type = elink_platform_chip_match[version.platform];
-
-	dev_info(elink->dev, "Epiphany FPGA elink at address %pa\n",
-		 &elink->regs_start);
-	dev_info(elink->dev,
-		 "revision %02x type %02x platform %02x generation %02x\n",
-		 version.revision,
-		 version.type,
-		 version.platform,
-		 version.generation);
-
-out_clks:
-	elink_clks_put(elink);
-
-	return ret;
-}
-
-static int elink_of_probe_clks(struct elink_device *elink)
+static int elink_of_probe_clks(struct platform_device *pdev,
+			       struct elink_device *elink)
 {
 	int ret = 0, i = 0;
 
@@ -1431,115 +1432,111 @@ static int elink_of_probe_clks(struct elink_device *elink)
 		"fclk0", "fclk1", "fclk2", "fclk3"
 	};
 
-	elink->clocks = devm_kcalloc(elink->dev, ARRAY_SIZE(names) + 1,
+	elink->clocks = devm_kcalloc(&pdev->dev, ARRAY_SIZE(names) + 1,
 				     sizeof(struct clock *), GFP_KERNEL);
 	if (!elink->clocks)
 		return -ENOMEM;
 
 	for (i = 0; i < ARRAY_SIZE(names); i++) {
-		elink->clocks[i] = devm_clk_get(elink->dev, names[i]);
+		elink->clocks[i] = devm_clk_get(&pdev->dev, names[i]);
 		if (IS_ERR(elink->clocks[i])) {
 			ret = PTR_ERR(elink->clocks[i]);
 			goto err;
 		}
 
-		dev_dbg(elink->dev, "Added clock: %s\n", names[i]);
+		dev_dbg(&pdev->dev, "Added clock: %s\n", names[i]);
 	}
 
 	return 0;
 
 err:
 	for (i--; i >= 0; i--)
-		devm_clk_put(elink->dev, elink->clocks[i]);
+		devm_clk_put(&pdev->dev, elink->clocks[i]);
 
-	devm_kfree(elink->dev, elink->clocks);
+	devm_kfree(&pdev->dev, elink->clocks);
 	elink->clocks = NULL;
 
 	return ret;
 }
 
-static int elink_of_probe(struct elink_device *elink)
+static struct elink_device *elink_of_probe(struct platform_device *pdev)
 {
-	struct platform_device *pdev = to_platform_device(elink->dev);
+	struct elink_device *elink;
 	struct resource res;
 	u16 coreid;
 	int ret;
 
-	elink->phandle = elink->dev->of_node->phandle;
+	elink = devm_kzalloc(&pdev->dev, sizeof(*elink), GFP_KERNEL);
+	if (!elink)
+		return ERR_PTR(-ENOMEM);
+
+	elink->phandle = pdev->dev.of_node->phandle;
 	elink->coreid_pinout = -1;
 
 	/* Control regs */
-	ret = of_address_to_resource(elink->dev->of_node, 0, &res);
+	ret = of_address_to_resource(pdev->dev.of_node, 0, &res);
 	if (ret) {
-		dev_err(elink->dev, "no control reg resource\n");
-		return ret;
+		dev_err(&pdev->dev, "no control reg resource\n");
+		return ERR_PTR(ret);
 	}
 
-	if (!devm_request_mem_region(elink->dev, res.start,
+	if (!devm_request_mem_region(&pdev->dev, res.start,
 				     resource_size(&res), pdev->name)) {
-		dev_err(elink->dev,
+		dev_err(&pdev->dev,
 			"failed requesting control reg mem region\n");
-		return -ENOMEM;
+		return ERR_PTR(-ENOMEM);
 	}
 
 	elink->regs_start = res.start;
 	elink->regs_size = resource_size(&res);
-	elink->regs = devm_ioremap_nocache(elink->dev, elink->regs_start,
+	elink->regs = devm_ioremap_nocache(&pdev->dev, elink->regs_start,
 					   elink->regs_size);
 
 	if (!elink->regs) {
-		dev_err(elink->dev, "Mapping eLink registers failed.\n");
-		return -ENOMEM;
+		dev_err(&pdev->dev, "Mapping eLink registers failed.\n");
+		return ERR_PTR(-ENOMEM);
 	}
 
 	/* Host bus slave address range for emesh */
-	ret = of_address_to_resource(elink->dev->of_node, 1, &res);
+	ret = of_address_to_resource(pdev->dev.of_node, 1, &res);
 	if (ret) {
-		dev_err(elink->dev, "no bus resource\n");
-		return ret;
+		dev_err(&pdev->dev, "no bus resource\n");
+		return ERR_PTR(ret);
 	}
 
-	if (!devm_request_mem_region(elink->dev, res.start,
+	if (!devm_request_mem_region(&pdev->dev, res.start,
 				     resource_size(&res), pdev->name)) {
-		dev_err(elink->dev, "failed requesting emesh mem region\n");
-		return -ENOMEM;
+		dev_err(&pdev->dev, "failed requesting emesh mem region\n");
+		return ERR_PTR(-ENOMEM);
 	}
 
 	elink->emesh_start = res.start;
 	elink->emesh_size = resource_size(&res);
 
 	/* Clocks */
-	ret = elink_of_probe_clks(elink);
+	ret = elink_of_probe_clks(pdev, elink);
 	if (ret) {
-		dev_err(elink->dev, "Could not get clocks\n");
-		return ret;
+		dev_err(&pdev->dev, "Could not get clocks\n");
+		return ERR_PTR(ret);
 	}
 
 	/* Manually override coreid pinout. Set by array probe otherwise */
-	ret = of_property_read_u16(elink->dev->of_node, "adapteva,coreid",
+	ret = of_property_read_u16(pdev->dev.of_node, "adapteva,coreid",
 				   &coreid);
 	if (!ret) {
 		elink->coreid_pinout = (s16) coreid;
 	} else if (ret == -EINVAL) {
 		elink->coreid_pinout = -1;
 	} else {
-		dev_err(elink->dev, "Malformed coreid pinout dt property\n");
-		return ret;
+		dev_err(&pdev->dev, "Malformed coreid pinout dt property\n");
+		return ERR_PTR(ret);
 	}
-
-	/* Need to probe elink here since some array options might not be
-	 * supported by firmware version. */
-	ret = probe_elink(elink);
-	if (ret)
-		return ret;
 
 	ret = elink_register(elink);
 	if (ret)
-		return ret;
+		return ERR_PTR(ret);
 
-	list_add_tail(&elink->list, &epiphany_device->elink_list);
-
-	return 0;
+	return elink;
 }
 
 static int elink_platform_probe(struct platform_device *pdev)
@@ -1551,14 +1548,13 @@ static int elink_platform_probe(struct platform_device *pdev)
 	if (!elink)
 		return -ENOMEM;
 
-	elink->dev = &pdev->dev;
-
-	ret = elink_of_probe(elink);
-	if (ret) {
+	elink = elink_of_probe(pdev);
+	if (IS_ERR(elink)) {
+		ret = PTR_ERR(elink);
 		if (ret == -EPROBE_DEFER)
-			dev_info(elink->dev, "Deferring probe.\n");
+			dev_info(&pdev->dev, "Deferring probe.\n");
 		else
-			dev_warn(elink->dev, "Failed parsing device tree\n");
+			dev_warn(&pdev->dev, "Failed parsing device tree\n");
 
 		return ret;
 	}
@@ -1577,7 +1573,7 @@ static int elink_platform_remove(struct platform_device *pdev)
 
 	elink_unregister(elink);
 
-	dev_dbg(elink->dev, "device removed\n");
+	dev_dbg(&pdev->dev, "device removed\n");
 
 	return 0;
 }
