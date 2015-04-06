@@ -229,30 +229,6 @@ struct epiphany_device {
 	struct list_head chip_array_list;
 };
 
-
-/* Any point suggesting these three for drivers/of/base.c ? */
-#define count_phandle_with_fixed_args(np, list_name, cell_count) \
-	of_parse_phandle_with_fixed_args(np, list_name, cell_count, -1, NULL)
-
-static inline struct device_node
-*get_next_compatible_child(struct device_node *parent,
-			   struct device_node *child,
-			   char *compatible)
-{
-	for (child = of_get_next_child(parent, child); child != NULL;
-	     child = of_get_next_child(parent, child)) {
-		if (of_device_is_compatible(child, compatible))
-			return child;
-	}
-	return NULL;
-}
-
-#define for_each_compatible_child(parent, dn, compat) \
-	for (dn = get_next_compatible_child(parent, NULL, compat); \
-	     dn != NULL; \
-	     dn = get_next_compatible_child(parent, dn, compat))
-
-
 /* TODO: Sledge-hammer approach. Needed on some Kickstarter boards. Ultimately
  * these long sleeps should only be needed when modifying clocks. */
 static inline void epiphany_sleep(void)
