@@ -3,6 +3,7 @@
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/of_platform.h>
 #include <linux/clk.h>
 #include <linux/ioctl.h>
 #include <linux/fs.h>
@@ -1075,7 +1076,7 @@ static struct array_device *array_of_probe(struct platform_device *pdev)
 {
 	struct platform_device *ppdev =
 		to_platform_device(pdev->dev.parent);
-	struct elink_device *elink = platform_get_drvdata(ppdev);
+	struct elink_device *elink;
 	struct array_device *array;
 	struct device_node *supply_node;
 	struct regulator *supply;
@@ -1083,6 +1084,15 @@ static struct array_device *array_of_probe(struct platform_device *pdev)
 	u32 reg[4];
 	int ret;
 	const char *supply_name;
+
+	elink = platform_get_drvdata(ppdev);
+	if (!elink) {
+		/* This is a bug. array device should never be instantiated
+		 * unless parent elink probe did succeed. */
+		WARN_ON(true);
+		dev_err(&pdev->dev, "No parent elink\n");
+		return ERR_PTR(-ENXIO);
+	}
 
 	array = devm_kzalloc(&pdev->dev, sizeof(*array), GFP_KERNEL);
 	if (!array)
@@ -1577,6 +1587,12 @@ static int elink_platform_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, elink);
 
+	ret = of_platform_populate(pdev->dev.of_node, NULL, NULL, &pdev->dev);
+	if (ret) {
+		dev_err(&pdev->dev, "Failed to create DT children: %d\n", ret);
+		return ret;
+	}
+
 	return 0;
 }
 
@@ -1586,6 +1602,8 @@ static int elink_platform_remove(struct platform_device *pdev)
 
 	if (elink->connection.type == E_CONN_ARRAY)
 		array_unregister(elink->connection.array);
+
+	of_platform_depopulate(&pdev->dev);
 
 	elink_unregister(elink);
 
