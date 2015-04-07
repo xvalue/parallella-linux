@@ -222,8 +222,6 @@ struct mem_region {
 };
 
 struct epiphany_device {
-	bool reserved; /* Singleton */
-
 	int u_count; /* User count */
 
 	struct list_head elink_list;
@@ -1632,56 +1630,6 @@ static char *epiphany_devnode(struct device *dev, umode_t *mode)
 	return kasprintf(GFP_KERNEL, "epiphany/%s", dev_name(dev));
 }
 
-static int epiphany_platform_probe(struct platform_device *pdev)
-{
-	int ret;
-
-	mutex_lock(&driver_lock);
-
-	if (epiphany_device.reserved) {
-		dev_err(&pdev->dev,
-			"error: epiphany device already reserved\n");
-		ret = -EBUSY;
-		goto err;
-	}
-
-	epiphany_device.reserved = true;
-
-	dev_dbg(&pdev->dev, "device added\n");
-
-	mutex_unlock(&driver_lock);
-	return 0;
-
-err:
-	mutex_unlock(&driver_lock);
-	return ret;
-}
-
-static int epiphany_platform_remove(struct platform_device *pdev)
-{
-	mutex_lock(&driver_lock);
-	epiphany_device.reserved = false;
-	mutex_unlock(&driver_lock);
-
-	dev_dbg(&pdev->dev, "device removed\n");
-	return 0;
-}
-
-static const struct of_device_id epiphany_of_match[] = {
-	{ .compatible = "adapteva,epiphany" },
-	{ }
-};
-MODULE_DEVICE_TABLE(of, epiphany_of_match);
-
-static struct platform_driver epiphany_driver = {
-	.probe	= epiphany_platform_probe,
-	.remove	= epiphany_platform_remove,
-	.driver	= {
-		.name		= "epiphany",
-		.of_match_table	= of_match_ptr(epiphany_of_match)
-	}
-};
-
 static void epiphany_device_release(struct device *dev)
 {
 	/* No-op since we use devm_* */
@@ -1715,12 +1663,6 @@ static int __init epiphany_module_init(void)
 	}
 	pr_devel("epiphany device allocated, major %i\n", MAJOR(epiphany_devt));
 
-	ret = platform_driver_register(&epiphany_driver);
-	if (ret) {
-		pr_err("Failed to register epiphany platform driver.\n");
-		goto err_register_epiphany;
-	}
-
 	ret = platform_driver_register(&elink_driver);
 	if (ret) {
 		pr_err("Failed to register elink platform driver\n");
@@ -1733,14 +1675,11 @@ static int __init epiphany_module_init(void)
 		goto err_register_array;
 	}
 
-
 	return 0;
 
 err_register_array:
 	platform_driver_unregister(&elink_driver);
 err_register_elink:
-	platform_driver_unregister(&epiphany_driver);
-err_register_epiphany:
 	unregister_chrdev_region(epiphany_devt, E_DEV_NUM_MINORS);
 err_chrdev:
 	class_unregister(&epiphany_class);
@@ -1753,7 +1692,6 @@ static void __exit epiphany_module_exit(void)
 {
 	platform_driver_unregister(&array_driver);
 	platform_driver_unregister(&elink_driver);
-	platform_driver_unregister(&epiphany_driver);
 	unregister_chrdev_region(epiphany_devt, E_DEV_NUM_MINORS);
 	class_unregister(&epiphany_class);
 
