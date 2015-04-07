@@ -25,7 +25,7 @@
 
 static dev_t epiphany_devt;
 
-struct class *epiphany_class;
+static struct class epiphany_class;
 
 struct epiphany_device;
 /* Singleton */
@@ -1003,11 +1003,6 @@ static const struct attribute_group *dev_attr_groups_array[] = {
 };
 
 
-static void array_device_release(struct device *dev)
-{
-	/* No-op since we use devm_* */
-}
-
 static int array_register(struct array_device *array,
 			  struct elink_device *elink)
 {
@@ -1020,10 +1015,9 @@ static int array_register(struct array_device *array,
 	array->connections[array->parent_side].type = E_CONN_ELINK;
 	array->connections[array->parent_side].elink = elink;
 
-	array->dev.class = epiphany_class;
+	array->dev.class = &epiphany_class;
 	array->dev.parent = &elink->dev;
 	array->dev.groups = dev_attr_groups_array;
-	array->dev.release = array_device_release;
 	/* There can only be one array per elink, no name conflicts */
 	dev_set_name(&array->dev, "array");
 
@@ -1334,11 +1328,10 @@ static int elink_register(struct elink_device *elink)
 		goto err_cdev_add;
 	}
 
-	elink->dev.class = epiphany_class;
+	elink->dev.class = &epiphany_class;
 	elink->dev.parent = NULL;
 	elink->dev.devt = devt;
 	elink->dev.groups = dev_attr_groups_elink;
-	elink->dev.release = array_device_release; /* TODO: Generic name */
 	dev_set_name(&elink->dev, "elink%d", elink->minor);
 
 	ret = elink_probe(elink);
@@ -1672,6 +1665,18 @@ static struct platform_driver epiphany_driver = {
 	}
 };
 
+static void epiphany_device_release(struct device *dev)
+{
+	/* No-op since we use devm_* */
+}
+
+static struct class epiphany_class = {
+	.name	= "epiphany",
+	.owner	= THIS_MODULE,
+	.devnode = epiphany_devnode,
+	.dev_release = epiphany_device_release
+};
+
 static int __init epiphany_module_init(void)
 {
 	int ret;
@@ -1686,13 +1691,11 @@ static int __init epiphany_module_init(void)
 	INIT_LIST_HEAD(&epiphany_device->mem_region_list);
 	INIT_LIST_HEAD(&epiphany_device->chip_array_list);
 
-	epiphany_class = class_create(THIS_MODULE, "epiphany");
-	if (IS_ERR(epiphany_class)) {
-		pr_err("Unable to create epiphany class\n");
-		ret = PTR_ERR(epiphany_class);
+	ret = class_register(&epiphany_class);
+	if (ret) {
+		pr_err("Unable to register epiphany class\n");
 		goto err_class;
 	}
-	epiphany_class->devnode = epiphany_devnode;
 
 	ret = alloc_chrdev_region(&epiphany_devt, 0, E_DEV_NUM_MINORS,
 				  "epiphany");
@@ -1730,7 +1733,7 @@ err_register_elink:
 err_register_epiphany:
 	unregister_chrdev_region(epiphany_devt, E_DEV_NUM_MINORS);
 err_chrdev:
-	class_destroy(epiphany_class);
+	class_unregister(&epiphany_class);
 err_class:
 	kfree(epiphany_device);
 err_kzalloc:
@@ -1744,7 +1747,7 @@ static void __exit epiphany_module_exit(void)
 	platform_driver_unregister(&elink_driver);
 	platform_driver_unregister(&epiphany_driver);
 	unregister_chrdev_region(epiphany_devt, E_DEV_NUM_MINORS);
-	class_destroy(epiphany_class);
+	class_unregister(&epiphany_class);
 
 	WARN_ON(!list_empty(&epiphany_device->chip_array_list));
 	WARN_ON(!list_empty(&epiphany_device->elink_list));
