@@ -187,6 +187,8 @@ struct elink_device {
 	struct cdev cdev;
 	int minor;
 
+	struct list_head mem_region_list;
+
 	phandle phandle;
 };
 
@@ -224,7 +226,6 @@ struct epiphany_device {
 	int u_count; /* User count */
 
 	struct list_head elink_list;
-	struct list_head mem_region_list;
 	struct list_head chip_array_list;
 };
 
@@ -784,7 +785,7 @@ static int elink_char_mmap(struct file *file, struct vm_area_struct *vma)
 		return epiphany_map_memory(vma, true);
 
 	/* TODO: Access through separate device? /dev/emem */
-	list_for_each_entry(region, &epiphany_device.mem_region_list, list) {
+	list_for_each_entry(region, &elink->mem_region_list, list) {
 		if (region->start <= off &&
 		    off + size <= region->start + region->size)
 			return epiphany_map_memory(vma, false);
@@ -1365,6 +1366,8 @@ err_clks:
 
 void elink_unregister(struct elink_device *elink)
 {
+	struct list_head *curr, *next;
+
 	mutex_lock(&driver_lock);
 	list_del(&elink->list);
 	mutex_unlock(&driver_lock);
@@ -1377,7 +1380,59 @@ void elink_unregister(struct elink_device *elink)
 
 	elink_clks_put(elink);
 
+	list_for_each_safe(curr, next, &elink->mem_region_list)
+		list_del(curr);
+
 	/* Everything else is allocated with devm_* */
+}
+
+static int elink_of_probe_reserved_mem(struct platform_device *pdev,
+				       struct elink_device *elink)
+{
+	struct device *dev = &pdev->dev;
+	struct device_node *mem_node;
+	struct mem_region *mem_region;
+	struct resource res;
+	int ret = 0;
+
+	/* TODO: Only one memory region supported for now */
+	mem_node = of_parse_phandle(dev->of_node, "memory-region", 0);
+	if (!mem_node) {
+		/* TODO: When elink firmware has mmu we should accept no
+		 * memory region and downgrade to a warning. */
+		dev_err(dev, "reserved-mem: no memory-region\n");
+		return -ENODEV;
+	}
+
+	ret = of_address_to_resource(mem_node, 0, &res);
+	if (ret) {
+		dev_warn(dev, "reserved-mem: no resource\n");
+		goto out;
+	}
+
+	if (!devm_request_mem_region(dev, res.start, resource_size(&res),
+				     pdev->name)) {
+		dev_warn(dev, "reserved-mem: failed requesting mem region\n");
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	mem_region = devm_kzalloc(dev, sizeof(*mem_region), GFP_KERNEL);
+	if (!mem_region) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	mem_region->phandle = mem_node->phandle;
+	mem_region->start = res.start;
+	mem_region->size = resource_size(&res);
+
+	list_add_tail(&mem_region->list, &elink->mem_region_list);
+	dev_dbg(dev, "reserved-mem: added mem region at 0x%x\n", res.start);
+
+out:
+	of_node_put(mem_node);
+	return ret;
 }
 
 static int elink_of_probe_clks(struct platform_device *pdev,
@@ -1426,6 +1481,8 @@ static struct elink_device *elink_of_probe(struct platform_device *pdev)
 	elink = devm_kzalloc(&pdev->dev, sizeof(*elink), GFP_KERNEL);
 	if (!elink)
 		return ERR_PTR(-ENOMEM);
+
+	INIT_LIST_HEAD(&elink->mem_region_list);
 
 	elink->phandle = pdev->dev.of_node->phandle;
 	elink->coreid_pinout = -1;
@@ -1489,6 +1546,12 @@ static struct elink_device *elink_of_probe(struct platform_device *pdev)
 		return ERR_PTR(ret);
 	}
 
+	ret = elink_of_probe_reserved_mem(pdev, elink);
+	if (ret) {
+		dev_err(&pdev->dev, "reserved mem probe failed\n");
+		return ERR_PTR(ret);
+	}
+
 	ret = elink_register(elink);
 	if (ret)
 		return ERR_PTR(ret);
@@ -1500,10 +1563,6 @@ static int elink_platform_probe(struct platform_device *pdev)
 {
 	struct elink_device *elink;
 	int ret;
-
-	elink = devm_kzalloc(&pdev->dev, sizeof(*elink), GFP_KERNEL);
-	if (!elink)
-		return -ENOMEM;
 
 	elink = elink_of_probe(pdev);
 	if (IS_ERR(elink)) {
@@ -1555,55 +1614,6 @@ static char *epiphany_devnode(struct device *dev, umode_t *mode)
 	return kasprintf(GFP_KERNEL, "epiphany/%s", dev_name(dev));
 }
 
-static int epiphany_probe_reserved_mem(struct platform_device *pdev)
-{
-	struct device *dev = &pdev->dev;
-	struct device_node *mem_node;
-	struct mem_region *mem_region;
-	struct resource res;
-	int ret = 0;
-
-	/* TODO: Only one memory region supported for now */
-
-	mem_node = of_parse_phandle(dev->of_node, "memory-region", 0);
-	if (!mem_node) {
-		/* TODO: When elink firmware has mmu we should accept no
-		 * memory region and downgrade to a warning. */
-		dev_err(dev, "reserved-mem: no memory-region\n");
-		return -ENODEV;
-	}
-
-	ret = of_address_to_resource(mem_node, 0, &res);
-	if (ret) {
-		dev_warn(dev, "reserved-mem: no resource\n");
-		goto out;
-	}
-
-	if (!devm_request_mem_region(dev, res.start, resource_size(&res),
-				     pdev->name)) {
-		dev_warn(dev, "reserved-mem: failed requesting mem region\n");
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	mem_region = devm_kzalloc(dev, sizeof(*mem_region), GFP_KERNEL);
-	if (!mem_region) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	mem_region->phandle = mem_node->phandle;
-	mem_region->start = res.start;
-	mem_region->size = resource_size(&res);
-
-	list_add_tail(&mem_region->list, &epiphany_device.mem_region_list);
-	dev_dbg(dev, "reserved-mem: added mem region at 0x%x\n", res.start);
-
-out:
-	of_node_put(mem_node);
-	return ret;
-}
-
 static int epiphany_platform_probe(struct platform_device *pdev)
 {
 	int ret;
@@ -1619,12 +1629,6 @@ static int epiphany_platform_probe(struct platform_device *pdev)
 
 	epiphany_device.reserved = true;
 
-	ret = epiphany_probe_reserved_mem(pdev);
-	if (ret) {
-		dev_err(&pdev->dev, "platform probe failed\n");
-		goto err;
-	}
-
 	dev_dbg(&pdev->dev, "device added\n");
 
 	mutex_unlock(&driver_lock);
@@ -1637,11 +1641,7 @@ err:
 
 static int epiphany_platform_remove(struct platform_device *pdev)
 {
-	struct list_head *curr, *next;
-
 	mutex_lock(&driver_lock);
-	list_for_each_safe(curr, next, &epiphany_device.mem_region_list)
-		list_del(curr);
 	epiphany_device.reserved = false;
 	mutex_unlock(&driver_lock);
 
@@ -1681,7 +1681,6 @@ static int __init epiphany_module_init(void)
 	int ret;
 
 	INIT_LIST_HEAD(&epiphany_device.elink_list);
-	INIT_LIST_HEAD(&epiphany_device.mem_region_list);
 	INIT_LIST_HEAD(&epiphany_device.chip_array_list);
 
 	ret = class_register(&epiphany_class);
@@ -1742,7 +1741,6 @@ static void __exit epiphany_module_exit(void)
 
 	WARN_ON(!list_empty(&epiphany_device.chip_array_list));
 	WARN_ON(!list_empty(&epiphany_device.elink_list));
-	WARN_ON(!list_empty(&epiphany_device.mem_region_list));
 }
 module_exit(epiphany_module_exit);
 
