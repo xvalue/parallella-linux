@@ -499,52 +499,41 @@ static int configure_adjacent_links(struct elink_device *elink)
 	int i;
 	const struct epiphany_chip_info *cinfo;
 	struct array_device *array;
-	u16 north_chip, south_chip, east_chip, west_chip;
+	u16 north_chip, south_chip, east_chip, west_chip, the_chip;
+	enum elink_side side;
 
 	if (elink->connection.type != E_CONN_ARRAY)
 		return 0;
 
 	array = elink->connection.array;
 	cinfo = &epiphany_chip_info[array->chip_type];
+	side = elink->connection.side;
 
-	if (elink->connection.side == E_SIDE_N ||
-	    elink->connection.side == E_SIDE_S) {
+	switch (side) {
+	case E_SIDE_N:
+	case E_SIDE_S:
 		for (i = 0, north_chip = array->id;
 		     i < array->chip_cols;
 		     i++, north_chip += cinfo->cols) {
 			south_chip = north_chip +
 				COORDS((array->chip_rows - 1) * cinfo->rows, 0);
-
-			if (elink->connection.side == E_SIDE_N) {
-				return configure_chip_tx_divider(elink,
-								 north_chip,
-								 E_SIDE_N);
-			} else {
-				return configure_chip_tx_divider(elink,
-								 south_chip,
-								 E_SIDE_S);
-			}
+			the_chip = side == E_SIDE_N ? north_chip : south_chip;
+			return configure_chip_tx_divider(elink, the_chip, side);
 		}
-	} else {
+	case E_SIDE_E:
+	case E_SIDE_W:
 		for (i = 0, west_chip = array->id;
 		     i < array->chip_rows;
 		     i++, west_chip += COORDS(1, 0)) {
 			east_chip = west_chip +
 				COORDS(0, (array->chip_cols - 1) * cinfo->cols);
-
-			if (elink->connection.side == E_SIDE_W) {
-				return configure_chip_tx_divider(elink,
-								 west_chip,
-								 E_SIDE_W);
-			} else {
-				return configure_chip_tx_divider(elink,
-								 east_chip,
-								 E_SIDE_E);
-			}
+			the_chip = side == E_SIDE_W ? west_chip : east_chip;
+			return configure_chip_tx_divider(elink, the_chip, side);
 		}
+	default:
+		WARN_ON(true);
+		return -EINVAL;
 	}
-
-	return 0;
 }
 
 /* Reset the Epiphany platform */
