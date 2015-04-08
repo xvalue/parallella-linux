@@ -36,6 +36,7 @@
 #define E_DEV_NUM_MINORS	MINORMASK	/* Total to reserve */
 
 #define COREID_SHIFT 20
+#define COREID_MASK ((1 << COREID_SHIFT) - 1)
 
 /* Be careful, no range check */
 #define COORDS(row, col) ((row) * 64 | (col))
@@ -778,18 +779,27 @@ static const struct vm_operations_struct mmap_mem_ops = {
 
 static int elink_char_mmap(struct file *file, struct vm_area_struct *vma)
 {
-	unsigned long off = vma->vm_pgoff << PAGE_SHIFT;
-	unsigned long size = vma->vm_end - vma->vm_start;
+	int ret;
+	unsigned long off, size, coreoff, phys_off;
 	struct elink_device *elink = file_to_elink(file);
 	struct mem_region *region;
+	phys_addr_t core_phys = 0;
 
 	vma->vm_ops = &mmap_mem_ops;
 
-	/* TODO: adjust address */
+	off = vma->vm_pgoff << PAGE_SHIFT;
+	size = vma->vm_end - vma->vm_start;
 
-	if (elink->emesh_start <= off &&
-	    off + size <= elink->emesh_start + elink->emesh_size)
+	/* TODO: Need a fault handler to make this safe. We want to allow
+	 * mmapping an entire mesh/chip, which means there can be holes which
+	 * should result in segfaults if accessed. */
+	coreoff = off >> COREID_SHIFT;
+	ret = coreid_to_phys(elink, (u16) coreoff, &core_phys);
+	phys_off = core_phys | (off & COREID_MASK);
+	if (!ret && phys_off - elink->emesh_start + size <= elink->emesh_size) {
+		vma->vm_pgoff = phys_off >> PAGE_SHIFT;
 		return epiphany_map_memory(vma, true);
+	}
 
 	if (epiphany.param_unsafe_access &&
 	    elink->regs_start <= off &&
