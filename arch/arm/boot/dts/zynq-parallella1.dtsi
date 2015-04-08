@@ -70,6 +70,9 @@
 		#phy-cells = <0>;
 		status = "disabled";
 	};
+
+	elink0: elink0@70000000 {
+	};
 };
 
 &clkc {
@@ -77,79 +80,69 @@
 	ps-clk-frequency = <33333333>;
 };
 
-&fpga {
-	epiphany: epiphany {
-	};
-};
+&elink0 {
+	compatible = "adapteva,elink";
 
-&epiphany {
-	compatible = "adapteva,epiphany", "simple-bus";
-	#address-cells = <1>;
-	#size-cells = <1>;
-	ranges;
+	clocks = <&clkc 15>, <&clkc 16>, <&clkc 17>, <&clkc 18>;
+	clock-names = "fclk0", "fclk1", "fclk2", "fclk3";
 
+	#address-cells = <2>; /* <north-west core's id, side (NESW)> */
+	#size-cells = <2>; /* <#chip rows, #chip cols> */
+
+	/* Can have more than one reserved memory region. Memory regions
+	 * can be shared by elinks.  */
 	memory-region = <&emem>;
 
-	elink0: elink0@70000000 {
-		compatible = "adapteva,elink", "simple-bus";
+	/* Can have at most one child node with compatible string
+	 * "adapteva,array" or "adapteva,gpio" ??? */
 
-		clocks = <&clkc 15>, <&clkc 16>, <&clkc 17>, <&clkc 18>;
-		clock-names = "fclk0", "fclk1", "fclk2", "fclk3";
+	/* First range is FPGA config regs.
+	 * Second range is mappable emesh region.
+	 * _4_ * 64 * (1<<20)
+	 */
+	reg = <0x70000000 0x1000>, <0x80000000 0x10000000>;
 
-		#address-cells = <2>; /* <north-west core's id, side (NESW)> */
-		#size-cells = <2>; /* <#chip rows, #chip cols> */
-
-		/* Can have at most one child node with compatible string
-		 * "adapteva,array" or "adapteva,gpio" ??? */
-
-		/* First range is FPGA config regs.
-		 * Second range is mappable emesh region.
-		 * _4_ * 64 * (1<<20)
-		 */
-		reg = <0x70000000 0x1000>, <0x80000000 0x10000000>;
-
-		/* (Optional) coreid pin-out register(s) configuration. */
-		/* If we add some constraints we could derive this from the
-		 * child node ???
-		 */
-		/*adapteva,coreid = <0x808>; */
+	/* (Optional) coreid pin-out register(s) configuration. */
+	/* If we add some constraints we could derive this from the
+	 * child node ???
+	 */
+	/*adapteva,coreid = <0x808>; */
 
 
-		/* Initial FPGA elink MMU config. This is hardcoded in the FPGA
-		 * code now.
-		 * Not sure if we actually need it here. Driver needs to probe
-		 * bitstream version to check whether it is supported or not
-		 * anyways. And if not this is the only mapping we will allow */
-		/*adapteva,mmu = <0x8e000000 0x3e000000 0x02000000>;*/
+	/* Initial FPGA elink MMU config. This is hardcoded in the FPGA
+	 * code now.
+	 * Not sure if we actually need it here. Driver needs to probe
+	 * bitstream version to check whether it is supported or not
+	 * anyways. And if not this is the only mapping we will allow */
+	adapteva,mmu = <0x8e000000 0x3e000000 0x02000000>;
 
-		array0@808 {
-			compatible = "adapteva,chip-array";
-			/* North-westmost coreid, #NESW, #chip rows, #chip cols */
-			reg = <0x808 1 1 1>;
+	array0@808 {
+		compatible = "adapteva,chip-array";
+		/* North-westmost coreid, #NESW, #chip rows, #chip cols */
+		reg = <0x808 1 1 1>;
 
-			/* TODO: Move to elink node? */
-			/* Optional power / thermal control. Will not implement much for
-			 * now but will read supply voltage to check if we can
-			 * run chip elink TX at full speed. Can be a list. */
-			vdd-supply = <&regulator_epiphany>; /* Can be a list */
-			/*io-channels = <&adc 0>;*/
-			/*io-channel-names = "zynq_temp";*/
+		/* TODO: Move to elink node? */
+		/* Optional power / thermal control. Will not implement much for
+		 * now but will read supply voltage to check if we can
+		 * run chip elink TX at full speed. Can be a list. */
+		vdd-supply = <&regulator_epiphany>; /* Can be a list */
+		/*io-channels = <&adc 0>;*/
+		/*io-channel-names = "zynq_temp";*/
 
 /*
-			// reg North=0, East=1, South=2, West=3
-			ports {
-				#address-cells = <1>;
-				#size-cells = <0>;
-				port@0 {
-					reg = <1>;
+		// reg North=0, East=1, South=2, West=3
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@0 {
+				reg = <1>;
 
-					array0_east: endpoint {
-						remote-endpoint = <&elink0_port>;
-					};
+				array0_east: endpoint {
+					remote-endpoint = <&elink0_port>;
 				};
 			};
-*/
 		};
+*/
 	};
 };
 
