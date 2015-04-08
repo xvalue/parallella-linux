@@ -24,26 +24,30 @@
 
 #define E_DEV_NUM_MINORS	MINORMASK	/* Total to reserve */
 
-static dev_t epiphany_devt;
-
-static struct class epiphany_class;
-
-/* Singleton */
-static struct epiphany_device epiphany_device;
-
-static DEFINE_IDR(epiphany_minor_idr);
-/* Used by minor_get() / minor_put() */
-static DEFINE_SPINLOCK(epiphany_minor_idr_lock);
-
-/* One big lock for everything */
-static DEFINE_MUTEX(driver_lock);
-
 #define COREID_SHIFT 20
 
 /* Be careful, no range check */
 #define COORDS(row, col) ((row) * 64 | (col))
 #define ROW(coreid) ((coreid) / 64)
 #define COL(coreid) ((coreid) % 64)
+
+
+static struct epiphany {
+	struct class		class;
+	int			u_count; /* User count */
+
+	struct list_head	elink_list;
+	struct list_head	chip_array_list;
+
+	dev_t			devt;
+
+	struct idr		minor_idr;
+	/* Used by minor_get() / minor_put() */
+	spinlock_t		minor_idr_lock;
+
+	/* One big lock for everything */
+	struct mutex		driver_lock;
+} epiphany = {};
 
 enum elink_side {
 	E_SIDE_N = 0,
@@ -219,13 +223,6 @@ struct mem_region {
 	size_t size;
 
 	phandle phandle;
-};
-
-struct epiphany_device {
-	int u_count; /* User count */
-
-	struct list_head elink_list;
-	struct list_head chip_array_list;
 };
 
 /* TODO: Sledge-hammer approach. Needed on some Kickstarter boards. Ultimately
@@ -644,9 +641,8 @@ static int epiphany_reset(void)
 	/* Unsafe to manipulate power if already in use. At any rate we should
 	 * not call regulator_enable() again since that would screw up the
 	 * regulator's refcount */
-	if (!epiphany_device.u_count) {
-		list_for_each_entry(array, &epiphany_device.chip_array_list,
-				    list) {
+	if (!epiphany.u_count) {
+		list_for_each_entry(array, &epiphany.chip_array_list, list) {
 			if (epiphany_regulator_enable(array)) {
 				/* Not much else we can do? */
 				retval = -EIO;
@@ -655,7 +651,7 @@ static int epiphany_reset(void)
 		}
 	}
 
-	list_for_each_entry(elink, &epiphany_device.elink_list, list) {
+	list_for_each_entry(elink, &epiphany.elink_list, list) {
 		err = reset_elink(elink);
 		if (err) {
 			retval = -EIO;
@@ -663,7 +659,7 @@ static int epiphany_reset(void)
 		}
 	}
 
-	list_for_each_entry(elink, &epiphany_device.elink_list, list) {
+	list_for_each_entry(elink, &epiphany.elink_list, list) {
 		if (elink->connection.type != E_CONN_ARRAY)
 			continue;
 		array_enable_clock_gating(elink, elink->connection.array);
@@ -681,20 +677,20 @@ static int elink_char_open(struct inode *inode, struct file *file)
 
 	file->private_data = inode->i_cdev;
 
-	if (mutex_lock_interruptible(&driver_lock))
+	if (mutex_lock_interruptible(&epiphany.driver_lock))
 		return -ERESTARTSYS;
 
-	if (!epiphany_device.u_count) {
-		/* if !epiphany_device.param_no_reset (or no power mgmt) */
+	if (!epiphany.u_count) {
+		/* if !epiphany.param_no_reset (or no power mgmt) */
 		ret = epiphany_reset();
 		if (ret)
 			goto mtx_unlock;
 	}
 
-	epiphany_device.u_count++;
+	epiphany.u_count++;
 
 mtx_unlock:
-	mutex_unlock(&driver_lock);
+	mutex_unlock(&epiphany.driver_lock);
 
 	return ret;
 }
@@ -704,11 +700,11 @@ static void epiphany_disable(void)
 	struct elink_device *elink;
 	struct array_device *array;
 
-	list_for_each_entry(elink, &epiphany_device.elink_list, list)
+	list_for_each_entry(elink, &epiphany.elink_list, list)
 		disable_elink(elink);
 
 	/* ??? TODO: Move arrays to elinks ? */
-	list_for_each_entry(array, &epiphany_device.chip_array_list, list) {
+	list_for_each_entry(array, &epiphany.chip_array_list, list) {
 		if (array->supply)
 			regulator_disable(array->supply);
 	}
@@ -718,17 +714,17 @@ static void epiphany_disable(void)
 static int elink_char_release(struct inode *inode, struct file *file)
 {
 	/* Not sure if interruptible is a good idea here ... */
-	mutex_lock(&driver_lock);
+	mutex_lock(&epiphany.driver_lock);
 
-	epiphany_device.u_count--;
+	epiphany.u_count--;
 
-	if (!epiphany_device.u_count) {
-		/* if (!epiphany_device.param_no_powersave) */
+	if (!epiphany.u_count) {
+		/* if (!epiphany.param_no_powersave) */
 		epiphany_disable();
-		pr_debug("epiphany_device: no users\n");
+		pr_debug("epiphany: no users\n");
 	}
 
-	mutex_unlock(&driver_lock);
+	mutex_unlock(&epiphany.driver_lock);
 	return 0;
 }
 
@@ -830,14 +826,14 @@ static long elink_char_ioctl(struct file *file, unsigned int cmd,
 		 * emesh concurrently. Either we need to suspend all tasks that
 		 * have the device open or perhaps we can do it with a fault
 		 * handler ? */
-		if (mutex_lock_interruptible(&driver_lock))
+		if (mutex_lock_interruptible(&epiphany.driver_lock))
 			return -ERESTARTSYS;
 		/* Reset all devices, might be a better idea to register a
 		 * "ectrl" control device for the class to make things more
 		 * explicit
 		 */
 		err = epiphany_reset();
-		mutex_unlock(&driver_lock);
+		mutex_unlock(&epiphany.driver_lock);
 
 		if (err)
 			return err;
@@ -855,19 +851,19 @@ static int minor_get(void *ptr)
 	int retval;
 
 	idr_preload(GFP_KERNEL);
-	spin_lock(&epiphany_minor_idr_lock);
-	retval = idr_alloc(&epiphany_minor_idr, ptr, 0, E_DEV_NUM_MINORS,
+	spin_lock(&epiphany.minor_idr_lock);
+	retval = idr_alloc(&epiphany.minor_idr, ptr, 0, E_DEV_NUM_MINORS,
 			   GFP_NOWAIT);
-	spin_unlock(&epiphany_minor_idr_lock);
+	spin_unlock(&epiphany.minor_idr_lock);
 	idr_preload_end();
 	return retval;
 }
 
 static void minor_put(int minor)
 {
-	spin_lock(&epiphany_minor_idr_lock);
-	idr_remove(&epiphany_minor_idr, minor);
-	spin_unlock(&epiphany_minor_idr_lock);
+	spin_lock(&epiphany.minor_idr_lock);
+	idr_remove(&epiphany.minor_idr, minor);
+	spin_unlock(&epiphany.minor_idr_lock);
 }
 
 static const struct file_operations elink_char_driver_ops = {
@@ -884,7 +880,7 @@ ssize_t array_attr_vdd_current_show(struct device *dev,
 	int ret = 0, vdd_curr;
 	struct array_device *array = device_to_array(dev);
 
-	if (mutex_lock_interruptible(&driver_lock))
+	if (mutex_lock_interruptible(&epiphany.driver_lock))
 		return -ERESTARTSYS;
 
 	if (!array->supply) {
@@ -901,7 +897,7 @@ ssize_t array_attr_vdd_current_show(struct device *dev,
 	ret = sprintf(buf, "%d\n", vdd_curr);
 
 out:
-	mutex_unlock(&driver_lock);
+	mutex_unlock(&epiphany.driver_lock);
 	return ret;
 }
 
@@ -911,7 +907,7 @@ ssize_t array_attr_vdd_wanted_show(struct device *dev,
 	int ret = 0;
 	struct array_device *array = device_to_array(dev);
 
-	if (mutex_lock_interruptible(&driver_lock))
+	if (mutex_lock_interruptible(&epiphany.driver_lock))
 		return -ERESTARTSYS;
 
 	if (!array->supply) {
@@ -922,7 +918,7 @@ ssize_t array_attr_vdd_wanted_show(struct device *dev,
 	ret = sprintf(buf, "%d\n", array->vdd_wanted);
 
 out:
-	mutex_unlock(&driver_lock);
+	mutex_unlock(&epiphany.driver_lock);
 	return ret;
 }
 
@@ -966,14 +962,14 @@ static ssize_t array_attr_vdd_wanted_store(struct device *dev,
 	if (ret < 0)
 		return ret;
 
-	if (mutex_lock_interruptible(&driver_lock))
+	if (mutex_lock_interruptible(&epiphany.driver_lock))
 		return -ERESTARTSYS;
 
 	ret = array_set_vdd_wanted(array, data);
 	if (!ret)
 		ret = len;
 
-	mutex_unlock(&driver_lock);
+	mutex_unlock(&epiphany.driver_lock);
 	return ret;
 }
 
@@ -1014,7 +1010,7 @@ static int array_register(struct array_device *array,
 	array->connections[array->parent_side].type = E_CONN_ELINK;
 	array->connections[array->parent_side].elink = elink;
 
-	array->dev.class = &epiphany_class;
+	array->dev.class = &epiphany.class;
 	array->dev.parent = &elink->dev;
 	array->dev.groups = dev_attr_groups_array;
 	/* There can only be one array per elink, no name conflicts */
@@ -1026,7 +1022,7 @@ static int array_register(struct array_device *array,
 		goto err_dev_create;
 	}
 
-	mutex_lock(&driver_lock);
+	mutex_lock(&epiphany.driver_lock);
 	/* TODO: roll back if elink is not disconnected */
 	WARN_ON(elink->connection.type != E_CONN_DISCONNECTED);
 	if (elink->quirk_coreid_is_noop && array->id != 0x808) {
@@ -1043,8 +1039,8 @@ static int array_register(struct array_device *array,
 	elink->connection.type = E_CONN_ARRAY;
 	elink->connection.array = array;
 	elink->connection.side = array->parent_side;
-	list_add_tail(&array->list, &epiphany_device.chip_array_list);
-	mutex_unlock(&driver_lock);
+	list_add_tail(&array->list, &epiphany.chip_array_list);
+	mutex_unlock(&epiphany.driver_lock);
 
 	dev_dbg(&array->dev, "array_register: registered device\n");
 	return 0;
@@ -1059,13 +1055,13 @@ static void array_unregister(struct array_device *array)
 
 	WARN_ON(!elink);
 
-	mutex_lock(&driver_lock);
+	mutex_lock(&epiphany.driver_lock);
 	list_del(&array->list);
 	if (elink) {
 		elink->connection.type = E_CONN_DISCONNECTED;
 		elink->connection.array = NULL;
 	}
-	mutex_unlock(&driver_lock);
+	mutex_unlock(&epiphany.driver_lock);
 
 	device_unregister(&array->dev);
 }
@@ -1325,7 +1321,7 @@ static int elink_register(struct elink_device *elink)
 		goto err_minor;
 
 	elink->minor = ret;
-	devt = MKDEV(MAJOR(epiphany_devt), elink->minor);
+	devt = MKDEV(MAJOR(epiphany.devt), elink->minor);
 	cdev_init(&elink->cdev, &elink_char_driver_ops);
 	elink->cdev.owner = THIS_MODULE;
 
@@ -1336,7 +1332,7 @@ static int elink_register(struct elink_device *elink)
 		goto err_cdev_add;
 	}
 
-	elink->dev.class = &epiphany_class;
+	elink->dev.class = &epiphany.class;
 	elink->dev.parent = NULL;
 	elink->dev.devt = devt;
 	elink->dev.groups = dev_attr_groups_elink;
@@ -1354,9 +1350,9 @@ static int elink_register(struct elink_device *elink)
 		goto err_dev_create;
 	}
 
-	mutex_lock(&driver_lock);
-	list_add_tail(&elink->list, &epiphany_device.elink_list);
-	mutex_unlock(&driver_lock);
+	mutex_lock(&epiphany.driver_lock);
+	list_add_tail(&elink->list, &epiphany.elink_list);
+	mutex_unlock(&epiphany.driver_lock);
 
 	dev_dbg(&elink->dev, "elink_register: registered char device\n");
 	return 0;
@@ -1376,9 +1372,9 @@ void elink_unregister(struct elink_device *elink)
 {
 	struct list_head *curr, *next;
 
-	mutex_lock(&driver_lock);
+	mutex_lock(&epiphany.driver_lock);
 	list_del(&elink->list);
-	mutex_unlock(&driver_lock);
+	mutex_unlock(&epiphany.driver_lock);
 
 	cdev_del(&elink->cdev);
 
@@ -1635,33 +1631,43 @@ static void epiphany_device_release(struct device *dev)
 	/* No-op since we use devm_* */
 }
 
-static struct class epiphany_class = {
-	.name	= "epiphany",
-	.owner	= THIS_MODULE,
-	.devnode = epiphany_devnode,
-	.dev_release = epiphany_device_release
-};
+static void __init init_epiphany(void)
+{
+	epiphany.class.name = "epiphany";
+	epiphany.class.owner = THIS_MODULE;
+	epiphany.class.devnode = epiphany_devnode;
+	epiphany.class.dev_release = epiphany_device_release;
+
+	epiphany.u_count = 0;
+
+	INIT_LIST_HEAD(&epiphany.elink_list);
+	INIT_LIST_HEAD(&epiphany.chip_array_list);
+
+	idr_init(&epiphany.minor_idr);
+	spin_lock_init(&epiphany.minor_idr_lock);
+
+	mutex_init(&epiphany.driver_lock);
+}
 
 static int __init epiphany_module_init(void)
 {
 	int ret;
 
-	INIT_LIST_HEAD(&epiphany_device.elink_list);
-	INIT_LIST_HEAD(&epiphany_device.chip_array_list);
+	init_epiphany();
 
-	ret = class_register(&epiphany_class);
+	ret = class_register(&epiphany.class);
 	if (ret) {
 		pr_err("Unable to register epiphany class\n");
 		goto err_class;
 	}
 
-	ret = alloc_chrdev_region(&epiphany_devt, 0, E_DEV_NUM_MINORS,
+	ret = alloc_chrdev_region(&epiphany.devt, 0, E_DEV_NUM_MINORS,
 				  "epiphany");
 	if (ret) {
 		pr_err("Failed allocating epiphany major number: %i\n", ret);
 		goto err_chrdev;
 	}
-	pr_devel("epiphany device allocated, major %i\n", MAJOR(epiphany_devt));
+	pr_devel("epiphany device allocated, major %i\n", MAJOR(epiphany.devt));
 
 	ret = platform_driver_register(&elink_driver);
 	if (ret) {
@@ -1680,9 +1686,9 @@ static int __init epiphany_module_init(void)
 err_register_array:
 	platform_driver_unregister(&elink_driver);
 err_register_elink:
-	unregister_chrdev_region(epiphany_devt, E_DEV_NUM_MINORS);
+	unregister_chrdev_region(epiphany.devt, E_DEV_NUM_MINORS);
 err_chrdev:
-	class_unregister(&epiphany_class);
+	class_unregister(&epiphany.class);
 err_class:
 	return ret;
 }
@@ -1692,11 +1698,11 @@ static void __exit epiphany_module_exit(void)
 {
 	platform_driver_unregister(&array_driver);
 	platform_driver_unregister(&elink_driver);
-	unregister_chrdev_region(epiphany_devt, E_DEV_NUM_MINORS);
-	class_unregister(&epiphany_class);
+	unregister_chrdev_region(epiphany.devt, E_DEV_NUM_MINORS);
+	class_unregister(&epiphany.class);
 
-	WARN_ON(!list_empty(&epiphany_device.chip_array_list));
-	WARN_ON(!list_empty(&epiphany_device.elink_list));
+	WARN_ON(!list_empty(&epiphany.chip_array_list));
+	WARN_ON(!list_empty(&epiphany.elink_list));
 }
 module_exit(epiphany_module_exit);
 
