@@ -58,7 +58,13 @@ static struct epiphany {
 
 	/* One big lock for everything */
 	struct mutex		driver_lock;
+
+	/* Module parameters */
+	bool			param_unsafe_access; /* access to fpga regs */
 } epiphany = {};
+
+module_param_named(unsafe_access, epiphany.param_unsafe_access, bool, 0644);
+MODULE_PARM_DESC(unsafe_access, "Permit access to elink FPGA registers");
 
 enum elink_side {
 	E_SIDE_N = 0,
@@ -785,8 +791,8 @@ static int elink_char_mmap(struct file *file, struct vm_area_struct *vma)
 	    off + size <= elink->emesh_start + elink->emesh_size)
 		return epiphany_map_memory(vma, true);
 
-	/* TODO: Should only be allowed if param_unsafe is set */
-	if (elink->regs_start <= off &&
+	if (epiphany.param_unsafe_access &&
+	    elink->regs_start <= off &&
 	    off + size <= elink->regs_start + elink->regs_size)
 		return epiphany_map_memory(vma, true);
 
