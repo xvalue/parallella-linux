@@ -210,7 +210,11 @@ struct elink_device {
 	struct cdev cdev;
 	int minor;
 
+	/* Available memory regions */
 	struct list_head mem_region_list;
+
+	/* Mapped memory regions */
+	struct list_head mappings_list;
 
 	phandle phandle;
 };
@@ -238,6 +242,7 @@ struct array_device {
 struct mem_region {
 	struct list_head list;
 	phys_addr_t start;
+	phys_addr_t emesh_start;
 	size_t size;
 
 	phandle phandle;
@@ -782,13 +787,28 @@ static int elink_char_mmap(struct file *file, struct vm_area_struct *vma)
 	int ret;
 	unsigned long off, size, coreoff, phys_off;
 	struct elink_device *elink = file_to_elink(file);
-	struct mem_region *region;
+	struct mem_region *mapping;
 	phys_addr_t core_phys = 0;
 
 	vma->vm_ops = &mmap_mem_ops;
 
 	off = vma->vm_pgoff << PAGE_SHIFT;
 	size = vma->vm_end - vma->vm_start;
+
+	/* Check memory mappings first. These can be inside the Epiphany memory
+	 * region of an elink. But they are flat 1D mappings with no holes so
+	 * they are easy to check. */
+	list_for_each_entry(mapping, &elink->mappings_list, list) {
+		if (mapping->emesh_start <= off &&
+		    off + size <= mapping->emesh_start + mapping->size) {
+			/* Adjust offset from emesh to phys */
+			vma->vm_pgoff =
+				vma->vm_pgoff -
+				(mapping->emesh_start >> PAGE_SHIFT) +
+				(mapping->start >> PAGE_SHIFT);
+			return epiphany_map_memory(vma, false);
+		}
+	}
 
 	/* TODO: Need a fault handler to make this safe. We want to allow
 	 * mmapping an entire mesh/chip, which means there can be holes which
@@ -805,13 +825,6 @@ static int elink_char_mmap(struct file *file, struct vm_area_struct *vma)
 	    elink->regs_start <= off &&
 	    off + size <= elink->regs_start + elink->regs_size)
 		return epiphany_map_memory(vma, true);
-
-	/* TODO: Access through separate device? /dev/emem */
-	list_for_each_entry(region, &elink->mem_region_list, list) {
-		if (region->start <= off &&
-		    off + size <= region->start + region->size)
-			return epiphany_map_memory(vma, false);
-	}
 
 	dev_dbg(&elink->dev,
 		"elink_char_mmap: invalid request to map 0x%08lx, length 0x%08lx bytes\n",
@@ -1414,7 +1427,68 @@ void elink_unregister(struct elink_device *elink)
 	list_for_each_safe(curr, next, &elink->mem_region_list)
 		list_del(curr);
 
+	list_for_each_safe(curr, next, &elink->mappings_list)
+		list_del(curr);
+
 	/* Everything else is allocated with devm_* */
+}
+
+static int elink_of_probe_default_mappings(struct platform_device *pdev,
+					   struct elink_device *elink)
+{
+	struct property *prop;
+	u32 emesh_start, phys_start, size;
+	const __be32 *p = NULL;
+	struct mem_region *region, *mapping;
+	int i;
+
+	prop = of_find_property(pdev->dev.of_node, "adapteva,mmu", &i);
+	if (!prop) {
+		dev_dbg(&pdev->dev, "adapteva,mmu property is missing\n");
+		return 0;
+	}
+
+	i /= sizeof(u32);
+
+	if (i == 0 || i % 3) {
+		dev_err(&pdev->dev, "adapteva,mmu property is invalid\n");
+		return -EINVAL;
+	}
+
+	i /= 3;
+
+
+	for (; i > 0; i--) {
+		p = of_prop_next_u32(prop, p, &emesh_start);
+		if (!p)
+			return -EINVAL;
+		p = of_prop_next_u32(prop, p, &phys_start);
+		if (!p)
+			return -EINVAL;
+		p = of_prop_next_u32(prop, p, &size);
+		if (!p)
+			return -EINVAL;
+
+		list_for_each_entry(region, &elink->mem_region_list, list) {
+			if (region->start > phys_start ||
+			    phys_start - region->start + size > region->size)
+				continue;
+			mapping = devm_kzalloc(&pdev->dev, sizeof(*mapping),
+					       GFP_KERNEL);
+
+			mapping->size = size;
+			mapping->start = phys_start;
+			mapping->emesh_start = emesh_start;
+
+			list_add_tail(&mapping->list, &elink->mappings_list);
+			dev_dbg(&pdev->dev,
+				"added mapping: <0x%08x 0x%08x 0x%08x>\n",
+				emesh_start, phys_start, size);
+
+			break;
+		}
+	}
+	return 0;
 }
 
 static int elink_of_probe_reserved_mem(struct platform_device *pdev,
@@ -1514,6 +1588,7 @@ static struct elink_device *elink_of_probe(struct platform_device *pdev)
 		return ERR_PTR(-ENOMEM);
 
 	INIT_LIST_HEAD(&elink->mem_region_list);
+	INIT_LIST_HEAD(&elink->mappings_list);
 
 	elink->phandle = pdev->dev.of_node->phandle;
 	elink->coreid_pinout = -1;
@@ -1580,6 +1655,12 @@ static struct elink_device *elink_of_probe(struct platform_device *pdev)
 	ret = elink_of_probe_reserved_mem(pdev, elink);
 	if (ret) {
 		dev_err(&pdev->dev, "reserved mem probe failed\n");
+		return ERR_PTR(ret);
+	}
+
+	ret = elink_of_probe_default_mappings(pdev, elink);
+	if (ret) {
+		dev_err(&pdev->dev, "failed probing default mappings\n");
 		return ERR_PTR(ret);
 	}
 
