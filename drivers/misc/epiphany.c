@@ -67,28 +67,6 @@ static struct epiphany {
 module_param_named(unsafe_access, epiphany.param_unsafe_access, bool, 0644);
 MODULE_PARM_DESC(unsafe_access, "Permit access to elink FPGA registers");
 
-enum elink_side {
-	E_SIDE_N = 0,
-	E_SIDE_E,
-	E_SIDE_S,
-	E_SIDE_W,
-	E_SIDE_MAX
-};
-
-enum connection_type {
-	E_CONN_DISCONNECTED = 0,
-	E_CONN_ELINK,
-	E_CONN_ARRAY,
-	E_CONN_MAX
-};
-
-enum e_chip_type {
-	E_CHIP_INVAL = 0,
-	E_CHIP_E16G301,
-	E_CHIP_E64G401,
-	E_CHIP_MAX
-};
-
 static const u32 ctrlmode_hints[E_SIDE_MAX] = {
 	[E_SIDE_N] = E_CTRLMODE_NORTH,
 	[E_SIDE_E] = E_CTRLMODE_EAST,
@@ -173,8 +151,8 @@ static const enum e_chip_type elink_platform_chip_match[E_PLATF_MAX] = {
 };
 
 struct connection {
-	enum connection_type type; /* remote type */
-	enum elink_side side; /* remote side */
+	enum e_connection_type type; /* remote type */
+	enum e_link_side side; /* remote side */
 	union {
 		struct elink_device *elink;
 		struct array_device *array;
@@ -229,7 +207,7 @@ struct array_device {
 	unsigned int chip_cols;
 	enum e_chip_type chip_type;
 
-	enum elink_side parent_side; /* Side of array array is connected to to
+	enum e_link_side parent_side; /* Side of array array is connected to to
 					parent elink */
 	struct connection connections[E_SIDE_MAX];
 
@@ -326,7 +304,7 @@ static int coreid_to_phys(struct elink_device *elink, u16 coreid,
 static void elink_disable_chip_elink(struct elink_device *elink,
 				     struct array_device *array,
 				     u16 chipid,
-				     enum elink_side side)
+				     enum e_link_side side)
 {
 	int err;
 	const struct epiphany_chip_info *cinfo =
@@ -372,7 +350,7 @@ static void array_disable_disconnected_elinks(struct elink_device *elink,
 	int i;
 	const struct epiphany_chip_info *cinfo =
 		&epiphany_chip_info[array->chip_type];
-	enum elink_side side;
+	enum e_link_side side;
 	u32 mask = 0;
 	u16 north_chip, south_chip, east_chip, west_chip;
 
@@ -463,7 +441,7 @@ static void array_enable_clock_gating(struct elink_device *elink,
 
 static int configure_chip_tx_divider(struct elink_device *elink,
 				     u16 chipid,
-				     enum elink_side side)
+				     enum e_link_side side)
 {
 	int err;
 	struct array_device *array = elink->connection.array;
@@ -519,7 +497,7 @@ static int configure_adjacent_links(struct elink_device *elink)
 	const struct epiphany_chip_info *cinfo;
 	struct array_device *array;
 	u16 north_chip, south_chip, east_chip, west_chip, the_chip;
-	enum elink_side side;
+	enum e_link_side side;
 
 	if (elink->connection.type != E_CONN_ARRAY)
 		return 0;
@@ -840,10 +818,10 @@ static long elink_char_ioctl(struct file *file, unsigned int cmd,
 	/* ??? TODO: Reset elink only instead of entire system ? */
 	/* struct elink_device *elink = file_to_elink(file)->epiphany; */
 
-	if (_IOC_TYPE(cmd) != EPIPHANY_IOC_MAGIC)
+	if (_IOC_TYPE(cmd) != E_IOCTL_MAGIC)
 		return -ENOTTY;
 
-	if (_IOC_NR(cmd) > EPIPHANY_IOC_MAXNR)
+	if (_IOC_NR(cmd) > E_IOCTL_MAXNR)
 		return -ENOTTY;
 
 	/* Do we really need to do this check?
@@ -861,7 +839,7 @@ static long elink_char_ioctl(struct file *file, unsigned int cmd,
 		return -EFAULT;
 
 	switch (cmd) {
-	case EPIPHANY_IOC_RESET:
+	case E_IOCTL_RESET:
 		/* This is unsafe since another thread might be accessing the
 		 * emesh concurrently. Either we need to suspend all tasks that
 		 * have the device open or perhaps we can do it with a fault
@@ -1114,7 +1092,7 @@ static struct array_device *array_of_probe(struct platform_device *pdev)
 	struct array_device *array;
 	struct device_node *supply_node;
 	struct regulator *supply;
-	enum elink_side side;
+	enum e_link_side side;
 	u32 reg[4];
 	int ret;
 	const char *supply_name;
