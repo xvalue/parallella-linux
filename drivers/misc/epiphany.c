@@ -862,10 +862,9 @@ static int mesh_char_mmap(struct file *file, struct vm_area_struct *vma)
 	return _elink_char_mmap(elink, vma);
 }
 
-static long elink_char_ioctl_elink_get_mappings(struct file *file,
+static long elink_char_ioctl_elink_get_mappings(struct elink_device *elink,
 						unsigned long arg)
 {
-	struct elink_device *elink = file_to_elink(file);
 	struct e_mappings_info *info;
 	struct e_mappings_info *dest = (struct e_mappings_info *) arg;
 	struct mem_region *mapping;
@@ -894,9 +893,9 @@ static long elink_char_ioctl_elink_get_mappings(struct file *file,
 	return 0;
 }
 
-static long elink_char_ioctl_elink_probe(struct file *file, unsigned long arg)
+static long elink_char_ioctl_elink_probe(struct elink_device *elink,
+					 unsigned long arg)
 {
-	struct elink_device *elink = file_to_elink(file);
 	struct e_elink_info info = {};
 	struct e_elink_info *dest = (struct e_elink_info *) arg;
 	struct connection *conn;
@@ -956,7 +955,9 @@ static long elink_char_ioctl_elink_probe(struct file *file, unsigned long arg)
 static long elink_char_ioctl(struct file *file, unsigned int cmd,
 				unsigned long arg)
 {
+	struct elink_device *elink = file_to_elink(file);
 	int err = 0;
+
 	/* ??? TODO: Reset elink only instead of entire system ? */
 	/* struct elink_device *elink = file_to_elink(file)->epiphany; */
 
@@ -1000,9 +1001,9 @@ static long elink_char_ioctl(struct file *file, unsigned int cmd,
 
 		break;
 	case E_IOCTL_ELINK_PROBE:
-		return elink_char_ioctl_elink_probe(file, arg);
+		return elink_char_ioctl_elink_probe(elink, arg);
 	case E_IOCTL_GET_MAPPINGS:
-		return elink_char_ioctl_elink_get_mappings(file, arg);
+		return elink_char_ioctl_elink_get_mappings(elink, arg);
 
 	default:
 		return -ENOTTY;
