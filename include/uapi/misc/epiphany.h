@@ -41,45 +41,46 @@ enum e_chip_type {
 };
 
 struct e_mappings_info {
-	__u32 nmappings;
+	__u64 nmappings;
 	struct {
-		__u32 emesh_addr;
-		__u32 size;
+		__u64 emesh_addr;
+		__u64 size;
 	} mappings[E_LINK_MAX_MEM_MAPPINGS];
-};
+} __attribute__((packed));
 
 struct e_array_info {
-	__u32 id;
-	enum e_chip_type chip_type;
-	__u32 chip_rows;
-	__u32 chip_cols;
-	enum e_link_side parent_side;
-	dev_t mesh_dev;
+	__u64 id;
+	__u64 chip_type;
+	__u64 chip_rows;
+	__u64 chip_cols;
+	__u64 parent_side;
+	__u64 mesh_dev;
 	struct {
-		enum e_connection_type type;
+		__u64 type;
 		union {
-			dev_t dev;
-			__u32 id;
+			__u64 dev;
+			__u64 id;
 		};
 	} connections[E_SIDE_MAX];
-};
+} __attribute__((packed));
 
 struct e_elink_info {
-	dev_t dev;
+	__u64 dev;
 	__u32 version;
-	enum e_connection_type connection_type;
+	__u32 _pad;
+	__u64 connection_type;
 	union {
 		struct e_array_info array;
-		__u32 remote_elink_id;
+		__u64 remote_elink_id;
 	};
-};
+} __attribute__((packed));
 
 struct e_mesh_info {
-	dev_t dev;
-	enum e_chip_type chip_type;
-	__u32 narrays;
+	__u64 dev;
+	__u64 chip_type;
+	__u64 narrays;
 	struct e_array_info arrays[E_MESH_MAX_ARRAYS];
-};
+} __attribute__((packed));
 
 #define E_IOCTL_MAGIC  'E'
 #define E_IO(nr)		_IO(E_IOCTL_MAGIC, nr)
