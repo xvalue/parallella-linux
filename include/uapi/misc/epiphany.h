@@ -45,7 +45,7 @@ struct e_mappings_info {
 	struct {
 		__u32 emesh_addr;
 		__u32 size;
-	} mappings[0];
+	} mappings[E_LINK_MAX_MEM_MAPPINGS];
 };
 
 struct e_array_info {
