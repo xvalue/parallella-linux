@@ -50,12 +50,17 @@ static struct epiphany {
 
 	struct list_head	elink_list;
 	struct list_head	chip_array_list;
+	struct list_head	mesh_list;
 
 	dev_t			devt;
 
 	struct idr		minor_idr;
 	/* Used by minor_get() / minor_put() */
 	spinlock_t		minor_idr_lock;
+
+	/* For device naming */
+	atomic_t		elink_counter;
+	atomic_t		mesh_counter;
 
 	/* One big lock for everything */
 	struct mutex		driver_lock;
@@ -214,8 +219,21 @@ struct array_device {
 	struct regulator *supply;
 	int vdd_wanted;
 
+	struct mesh_device *mesh;
+
 	phandle phandle;
 };
+
+struct mesh_device {
+	struct list_head list;
+	struct device dev;
+
+	struct cdev cdev;
+	int minor;
+
+	struct array_device **arrays;
+};
+
 
 struct mem_region {
 	struct list_head list;
@@ -260,6 +278,15 @@ static inline struct array_device *device_to_array(struct device *dev)
 	return container_of(dev, struct array_device, dev);
 }
 
+static inline struct mesh_device *device_to_mesh(struct device *dev)
+{
+	return container_of(dev, struct mesh_device, dev);
+}
+
+static inline struct mesh_device *file_to_mesh(struct file *file)
+{
+	return container_of(file->private_data, struct mesh_device, cdev);
+}
 
 static int coreid_to_phys(struct elink_device *elink, u16 coreid,
 			  phys_addr_t *out)
@@ -672,7 +699,7 @@ out:
 	return retval;
 }
 
-static int elink_char_open(struct inode *inode, struct file *file)
+static int char_open(struct inode *inode, struct file *file)
 {
 	int ret = 0;
 
@@ -712,7 +739,7 @@ static void epiphany_disable(void)
 
 }
 
-static int elink_char_release(struct inode *inode, struct file *file)
+static int char_release(struct inode *inode, struct file *file)
 {
 	/* Not sure if interruptible is a good idea here ... */
 	mutex_lock(&epiphany.driver_lock);
@@ -760,11 +787,11 @@ static const struct vm_operations_struct mmap_mem_ops = {
 #endif
 };
 
-static int elink_char_mmap(struct file *file, struct vm_area_struct *vma)
+static int _elink_char_mmap(struct elink_device *elink,
+			    struct vm_area_struct *vma)
 {
 	int ret;
 	unsigned long off, size, coreoff, phys_off;
-	struct elink_device *elink = file_to_elink(file);
 	struct mem_region *mapping;
 	phys_addr_t core_phys = 0;
 
@@ -809,6 +836,30 @@ static int elink_char_mmap(struct file *file, struct vm_area_struct *vma)
 		off, size);
 
 	return -EINVAL;
+}
+
+static int elink_char_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	struct elink_device *elink = file_to_elink(file);
+
+	return _elink_char_mmap(elink, vma);
+}
+
+static int mesh_char_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	struct mesh_device *mesh = file_to_mesh(file);
+	struct array_device *array;
+	struct elink_device *elink;
+
+	array = mesh->arrays[0];
+	if (!array)
+		return -EINVAL;
+
+	elink = array->connections[array->parent_side].elink;
+	if (!elink)
+		return -EINVAL;
+
+	return _elink_char_mmap(elink, vma);
 }
 
 static long elink_char_ioctl_elink_get_mappings(struct file *file,
@@ -982,11 +1033,117 @@ static void minor_put(int minor)
 
 static const struct file_operations elink_char_driver_ops = {
 	.owner		= THIS_MODULE,
-	.open		= elink_char_open,
-	.release	= elink_char_release,
+	.open		= char_open,
+	.release	= char_release,
 	.mmap		= elink_char_mmap,
 	.unlocked_ioctl	= elink_char_ioctl
 };
+
+static const struct file_operations mesh_char_driver_ops = {
+	.owner		= THIS_MODULE,
+	.open		= char_open,
+	.release	= char_release,
+	.mmap		= mesh_char_mmap,
+};
+
+static void mesh_device_release(struct device *dev)
+{
+	struct mesh_device *mesh = device_to_mesh(dev);
+
+	dev_dbg(dev, "release\n");
+	kfree(mesh->arrays);
+	kfree(mesh);
+}
+
+/* TODO: Idea here is that we should try attach array to an existing mesh if
+ * possible. Otherwise create a new mesh. Now we just create a new mesh for
+ * each chip array. */
+static int mesh_attach_or_register(struct array_device *array)
+{
+	struct mesh_device *mesh;
+	int ret;
+	dev_t devt;
+
+	mesh = kzalloc(sizeof(*mesh), GFP_KERNEL);
+	if (!mesh)
+		return -ENOMEM;
+
+	mesh->arrays = kcalloc(1 + 1, sizeof(*(mesh->arrays)), GFP_KERNEL);
+	if (!mesh->arrays) {
+		kfree(mesh);
+		return -ENOMEM;
+	}
+
+	mesh->arrays[0] = array;
+
+	ret = minor_get(mesh);
+	if (ret < 0)
+		goto err_minor;
+
+	mesh->minor = ret;
+	devt = MKDEV(MAJOR(epiphany.devt), mesh->minor);
+	cdev_init(&mesh->cdev, &mesh_char_driver_ops);
+	mesh->cdev.owner = THIS_MODULE;
+
+	ret = cdev_add(&mesh->cdev, devt, 1);
+	if (ret) {
+		dev_err(&array->dev,
+			"CHAR registration failed for mesh device\n");
+		goto err_cdev_add;
+	}
+
+	mesh->dev.class = &epiphany.class;
+	mesh->dev.parent = NULL;
+	mesh->dev.devt = devt;
+	mesh->dev.groups = NULL;
+	mesh->dev.release = mesh_device_release;
+	/* TODO: Use separate counter per char dev type */
+	dev_set_name(&mesh->dev, "mesh%d",
+		     atomic_inc_return(&epiphany.mesh_counter) - 1);
+
+	ret = device_register(&mesh->dev);
+	if (ret) {
+		dev_err(&array->dev, "unable to create mesh device\n");
+		goto err_dev_create;
+	}
+
+	mutex_lock(&epiphany.driver_lock);
+	array->mesh = mesh;
+	list_add_tail(&mesh->list, &epiphany.mesh_list);
+	mutex_unlock(&epiphany.driver_lock);
+
+	dev_dbg(&mesh->dev, "mesh_attach_or_register: registered char device\n");
+	return 0;
+
+err_dev_create:
+	cdev_del(&mesh->cdev);
+err_cdev_add:
+	minor_put(mesh->minor);
+err_minor:
+	kfree(mesh->arrays);
+	kfree(mesh);
+
+	return ret;
+}
+
+void mesh_unregister(struct mesh_device *mesh)
+{
+	struct array_device **array;
+
+	mutex_lock(&epiphany.driver_lock);
+	for (array = &mesh->arrays[0]; *array; array++)
+		(*array)->mesh = NULL;
+	list_del(&mesh->list);
+	mutex_unlock(&epiphany.driver_lock);
+
+	cdev_del(&mesh->cdev);
+
+	device_unregister(&mesh->dev);
+
+	minor_put(mesh->minor);
+}
+
+
 
 ssize_t array_attr_vdd_current_show(struct device *dev,
 				    struct device_attribute *attr, char *buf)
@@ -1156,6 +1313,12 @@ static int array_register(struct array_device *array,
 	list_add_tail(&array->list, &epiphany.chip_array_list);
 	mutex_unlock(&epiphany.driver_lock);
 
+	ret = mesh_attach_or_register(array);
+	if (ret) {
+		dev_info(&array->dev,
+			 "array_register: could not attach to any mesh\n");
+	}
+
 	dev_dbg(&array->dev, "array_register: registered device\n");
 	return 0;
 
@@ -1166,6 +1329,7 @@ err_dev_create:
 static void array_unregister(struct array_device *array)
 {
 	struct elink_device *elink = device_to_elink(array->dev.parent);
+	struct array_device **arrcurr, **arrprev;
 
 	WARN_ON(!elink);
 
@@ -1175,6 +1339,21 @@ static void array_unregister(struct array_device *array)
 		elink->connection.type = E_CONN_DISCONNECTED;
 		elink->connection.array = NULL;
 	}
+	if (array->mesh) {
+		/* Delete this array from list */
+		arrprev = NULL;
+		for (arrcurr = &array->mesh->arrays[0]; *arrcurr; arrcurr++) {
+			if (!arrprev) {
+				if (*arrcurr == array)
+					*arrcurr = NULL;
+					arrprev = arrcurr;
+			} else {
+				*arrprev = *arrcurr;
+				arrprev++;
+			}
+		}
+	}
+	array->mesh = NULL;
 	mutex_unlock(&epiphany.driver_lock);
 
 	device_unregister(&array->dev);
@@ -1450,7 +1629,8 @@ static int elink_register(struct elink_device *elink)
 	elink->dev.parent = NULL;
 	elink->dev.devt = devt;
 	elink->dev.groups = dev_attr_groups_elink;
-	dev_set_name(&elink->dev, "elink%d", elink->minor);
+	dev_set_name(&elink->dev, "elink%d",
+		     atomic_inc_return(&epiphany.elink_counter) - 1);
 
 	ret = elink_probe(elink);
 	if (ret) {
@@ -1824,9 +2004,14 @@ static void __init init_epiphany(void)
 
 	INIT_LIST_HEAD(&epiphany.elink_list);
 	INIT_LIST_HEAD(&epiphany.chip_array_list);
+	INIT_LIST_HEAD(&epiphany.mesh_list);
 
 	idr_init(&epiphany.minor_idr);
 	spin_lock_init(&epiphany.minor_idr_lock);
+
+
+	atomic_set(&epiphany.elink_counter, 0);
+	atomic_set(&epiphany.mesh_counter, 0);
 
 	mutex_init(&epiphany.driver_lock);
 }
@@ -1878,6 +2063,11 @@ module_init(epiphany_module_init);
 
 static void __exit epiphany_module_exit(void)
 {
+	struct mesh_device *curr, *next;
+
+	list_for_each_entry_safe(curr, next, &epiphany.mesh_list, list)
+		mesh_unregister(curr);
+
 	platform_driver_unregister(&array_driver);
 	platform_driver_unregister(&elink_driver);
 	unregister_chrdev_region(epiphany.devt, E_DEV_NUM_MINORS);
@@ -1885,6 +2075,7 @@ static void __exit epiphany_module_exit(void)
 
 	WARN_ON(!list_empty(&epiphany.chip_array_list));
 	WARN_ON(!list_empty(&epiphany.elink_list));
+	WARN_ON(!list_empty(&epiphany.mesh_list));
 }
 module_exit(epiphany_module_exit);
 
