@@ -811,6 +811,37 @@ static int elink_char_mmap(struct file *file, struct vm_area_struct *vma)
 	return -EINVAL;
 }
 
+static long elink_char_ioctl_elink_get_mappings(struct file *file,
+						unsigned long arg)
+{
+	struct elink_device *elink = file_to_elink(file);
+	struct e_mappings_info *info;
+	struct e_mappings_info *dest = (struct e_mappings_info *) arg;
+	struct mem_region *mapping;
+	int ret = 0;
+
+	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	if (!info)
+		return -ENOMEM;
+
+	list_for_each_entry(mapping, &elink->mappings_list, list) {
+		info->mappings[info->nmappings].emesh_addr =
+			mapping->emesh_start;
+		info->mappings[info->nmappings].size = mapping->size;
+		info->nmappings++;
+	}
+
+	ret = copy_to_user(dest, info, sizeof(*info));
+
+	kfree(info);
+
+	if (ret) {
+		dev_dbg(&elink->dev, "elink get mappings ioctl failed.\n");
+		return ret;
+	}
+
+	return 0;
+}
 
 static long elink_char_ioctl_elink_probe(struct file *file, unsigned long arg)
 {
@@ -919,6 +950,8 @@ static long elink_char_ioctl(struct file *file, unsigned int cmd,
 		break;
 	case E_IOCTL_ELINK_PROBE:
 		return elink_char_ioctl_elink_probe(file, arg);
+	case E_IOCTL_GET_MAPPINGS:
+		return elink_char_ioctl_elink_get_mappings(file, arg);
 
 	default:
 		return -ENOTTY;
