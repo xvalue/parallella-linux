@@ -811,6 +811,66 @@ static int elink_char_mmap(struct file *file, struct vm_area_struct *vma)
 	return -EINVAL;
 }
 
+
+static long elink_char_ioctl_elink_probe(struct file *file, unsigned long arg)
+{
+	struct elink_device *elink = file_to_elink(file);
+	struct e_elink_info info = {};
+	struct e_elink_info *dest = (struct e_elink_info *) arg;
+	struct connection *conn;
+	int ret = 0, i;
+
+	info.dev = elink->cdev.dev;
+	info.version = elink->version.reg;
+	info.connection_type = elink->connection.type;
+	switch (elink->connection.type) {
+	case E_CONN_DISCONNECTED:
+		break;
+	case E_CONN_ARRAY:
+		info.array.id = elink->connection.array->id;
+		info.array.chip_type = elink->connection.array->chip_type;
+		info.array.chip_rows = elink->connection.array->chip_rows;
+		info.array.chip_cols = elink->connection.array->chip_cols;
+		info.array.parent_side = elink->connection.array->parent_side;
+		/* TODO: Implement mesh dev... */
+		info.array.mesh_dev = 0;
+
+		for (i = 0; i < E_SIDE_MAX; i++) {
+			conn = &elink->connection.array->connections[i];
+			info.array.connections[i].type = conn->type;
+			switch (conn->type) {
+			case E_CONN_DISCONNECTED:
+				break;
+			case E_CONN_ELINK:
+				info.array.connections[i].dev =
+					conn->elink->cdev.dev;
+				break;
+			case E_CONN_ARRAY:
+				info.array.connections[i].id =
+					conn->array->id;
+				break;
+			default:
+				/* TODO: Implement other types */
+				WARN_ON(true);
+				break;
+			}
+		}
+		break;
+	default:
+		/* TODO: Implement other types */
+		WARN_ON(true);
+		break;
+	}
+
+	ret = copy_to_user(dest, &info, sizeof(info));
+	if (ret) {
+		dev_dbg(&elink->dev, "elink probe ioctl failed.\n");
+		return ret;
+	}
+
+	return 0;
+}
+
 static long elink_char_ioctl(struct file *file, unsigned int cmd,
 				unsigned long arg)
 {
@@ -857,6 +917,9 @@ static long elink_char_ioctl(struct file *file, unsigned int cmd,
 			return err;
 
 		break;
+	case E_IOCTL_ELINK_PROBE:
+		return elink_char_ioctl_elink_probe(file, arg);
+
 	default:
 		return -ENOTTY;
 	}
