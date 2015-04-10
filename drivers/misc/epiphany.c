@@ -913,8 +913,7 @@ static long elink_char_ioctl_elink_probe(struct elink_device *elink,
 		info.array.chip_rows = elink->connection.array->chip_rows;
 		info.array.chip_cols = elink->connection.array->chip_cols;
 		info.array.parent_side = elink->connection.array->parent_side;
-		/* TODO: Implement mesh dev... */
-		info.array.mesh_dev = 0;
+		info.array.mesh_dev = elink->connection.array->mesh->cdev.dev;
 
 		for (i = 0; i < E_SIDE_MAX; i++) {
 			conn = &elink->connection.array->connections[i];
