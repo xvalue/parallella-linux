@@ -1011,6 +1011,143 @@ static long elink_char_ioctl(struct file *file, unsigned int cmd,
 	return 0;
 }
 
+/* TODO: Currently we only support meshes with one chip-array ... */
+static long mesh_char_ioctl_probe(struct mesh_device *mesh, unsigned long arg)
+{
+	struct array_device *array;
+	struct e_mesh_info *info;
+	struct e_mesh_info *dest = (struct e_mesh_info *) arg;
+	struct connection *conn;
+	int ret, i;
+
+	if (!mesh->arrays)
+		return -ENODEV;
+
+	array = mesh->arrays[0];
+	if (!array)
+		return -ENODEV;
+
+	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	if (!info)
+		return -ENOMEM;
+
+	info->dev = mesh->cdev.dev;
+	info->chip_type = array->chip_type;
+
+	info->narrays = 1;
+	info->arrays[0].id = array->id;
+	info->arrays[0].chip_type = array->chip_type;
+	info->arrays[0].chip_rows = array->chip_rows;
+	info->arrays[0].chip_cols = array->chip_cols;
+	info->arrays[0].parent_side = array->parent_side;
+	info->arrays[0].mesh_dev = array->mesh->cdev.dev;
+
+	for (i = 0; i < E_SIDE_MAX; i++) {
+		conn = &array->connections[i];
+		info->arrays[0].connections[i].type = conn->type;
+		switch (conn->type) {
+		case E_CONN_DISCONNECTED:
+			break;
+		case E_CONN_ELINK:
+			info->arrays[0].connections[i].dev =
+				conn->elink->cdev.dev;
+			break;
+		case E_CONN_ARRAY:
+			info->arrays[0].connections[i].id =
+				conn->array->id;
+			break;
+		default:
+			/* TODO: Implement other types */
+			WARN_ON(true);
+			break;
+		}
+	}
+
+	ret = copy_to_user(dest, info, sizeof(*info));
+
+	kfree(info);
+
+	if (ret) {
+		dev_dbg(&mesh->dev, "mesh probe ioctl failed.\n");
+		return ret;
+	}
+
+	return 0;
+}
+
+static long mesh_char_ioctl(struct file *file, unsigned int cmd,
+				unsigned long arg)
+{
+	struct mesh_device *mesh = file_to_mesh(file);
+	struct array_device *array;
+	struct elink_device *elink;
+	int err = 0;
+
+	array = mesh->arrays[0];
+	if (!array)
+		return -EINVAL;
+
+	elink = array->connections[array->parent_side].elink;
+	if (!elink)
+		return -EINVAL;
+
+
+	/* ??? TODO: Reset elink only instead of entire system ? */
+	/* struct elink_device *elink = file_to_elink(file)->epiphany; */
+
+	if (_IOC_TYPE(cmd) != E_IOCTL_MAGIC)
+		return -ENOTTY;
+
+	if (_IOC_NR(cmd) > E_IOCTL_MAXNR)
+		return -ENOTTY;
+
+	/* Do we really need to do this check?
+	 * Isn't copy_to_user() already doing that? */
+	if (_IOC_DIR(cmd) & _IOC_READ) {
+		err =
+		    !access_ok(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
+	} else if (_IOC_DIR(cmd) & _IOC_WRITE) {
+		err =
+		    !access_ok(VERIFY_WRITE, (void __user *)arg,
+			       _IOC_SIZE(cmd));
+	}
+
+	if (err)
+		return -EFAULT;
+
+	switch (cmd) {
+	case E_IOCTL_RESET:
+		/* This is unsafe since another thread might be accessing the
+		 * emesh concurrently. Either we need to suspend all tasks that
+		 * have the device open or perhaps we can do it with a fault
+		 * handler ? */
+		if (mutex_lock_interruptible(&epiphany.driver_lock))
+			return -ERESTARTSYS;
+		/* Reset all devices, might be a better idea to register a
+		 * "ectrl" control device for the class to make things more
+		 * explicit
+		 */
+		err = epiphany_reset();
+		mutex_unlock(&epiphany.driver_lock);
+
+		if (err)
+			return err;
+
+		break;
+
+	case E_IOCTL_MESH_PROBE:
+		return mesh_char_ioctl_probe(mesh, arg);
+
+	case E_IOCTL_GET_MAPPINGS:
+		return elink_char_ioctl_elink_get_mappings(elink, arg);
+
+	default:
+		return -ENOTTY;
+	}
+
+	return 0;
+}
+
 static int minor_get(void *ptr)
 {
 	int retval;
@@ -1044,6 +1181,7 @@ static const struct file_operations mesh_char_driver_ops = {
 	.open		= char_open,
 	.release	= char_release,
 	.mmap		= mesh_char_mmap,
+	.unlocked_ioctl	= mesh_char_ioctl
 };
 
 static void mesh_device_release(struct device *dev)
