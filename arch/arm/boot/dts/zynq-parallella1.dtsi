@@ -108,6 +108,8 @@
 	 */
 	/*adapteva,coreid = <0x808>; */
 
+	/* No connection between elink coreid pins and the Epiphany chip */
+	adapteva,no-coreid-pinout;
 
 	/* Initial FPGA elink MMU config. This is hardcoded in the FPGA
 	 * code now.
