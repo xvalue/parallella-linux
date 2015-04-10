@@ -15,7 +15,7 @@
 #include <linux/types.h>
 #include <linux/ioctl.h>
 
-#define E_MESH_MAX_ARRAYS	256
+#define E_MESH_MAX_ARRAYS	128
 #define E_LINK_MAX_MEM_MAPPINGS	256
 
 enum e_link_side {
@@ -79,7 +79,9 @@ struct e_mesh_info {
 	__u64 dev;
 	__u64 chip_type;
 	__u64 narrays;
+#if 1
 	struct e_array_info arrays[E_MESH_MAX_ARRAYS];
+#endif
 } __attribute__((packed));
 
 #define E_IOCTL_MAGIC  'E'
@@ -95,7 +97,7 @@ struct e_mesh_info {
 
 #define E_IOCTL_RESET			E_IO(0x00)
 #define E_IOCTL_ELINK_PROBE		E_IOR(0x01, struct e_elink_info)
-#define E_IOCTL_MESH_PROBE		E_IOR(0x02, struct e_array_info)
+#define E_IOCTL_MESH_PROBE		E_IOR(0x02, struct e_mesh_info)
 #define E_IOCTL_GET_MAPPINGS		E_IOR(0x03, struct e_mappings_info)
 
 #define E_IOCTL_MAXNR			0x03
