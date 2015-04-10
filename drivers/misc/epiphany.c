@@ -1411,12 +1411,18 @@ static const struct attribute_group *dev_attr_groups_array[] = {
 static int array_register(struct array_device *array,
 			  struct elink_device *elink)
 {
-	int ret;
+	int ret, boot_vdd;
 	const struct epiphany_chip_info *cinfo =
 		&epiphany_chip_info[elink->chip_type];
 
 	array->chip_type = elink->chip_type;
 	array->vdd_wanted = cinfo->vdd_default;
+	if (array->supply) {
+		/* Don't override boot vdd if above default */
+		boot_vdd = regulator_get_voltage(array->supply);
+		if (cinfo->vdd_default < boot_vdd && boot_vdd < cinfo->vdd_max)
+			array->vdd_wanted = boot_vdd;
+	}
 	array->connections[array->parent_side].type = E_CONN_ELINK;
 	array->connections[array->parent_side].elink = elink;
 
