@@ -61,6 +61,7 @@ static struct epiphany {
 	/* For device naming */
 	atomic_t		elink_counter;
 	atomic_t		mesh_counter;
+	atomic_t		array_counter;
 
 	/* One big lock for everything */
 	struct mutex		driver_lock;
@@ -1422,14 +1423,19 @@ static int array_register(struct array_device *array,
 	array->dev.class = &epiphany.class;
 	array->dev.parent = &elink->dev;
 	array->dev.groups = dev_attr_groups_array;
-	/* There can only be one array per elink, no name conflicts */
-	dev_set_name(&array->dev, "array");
+	dev_set_name(&array->dev, "array%d",
+		     atomic_inc_return(&epiphany.array_counter) - 1);
 
 	ret = device_register(&array->dev);
 	if (ret) {
 		dev_err(&array->dev, "unable to create device array device\n");
 		goto err_dev_create;
 	}
+
+	/* There can only be one array per elink, no name conflicts */
+	ret = sysfs_create_link(&elink->dev.kobj, &array->dev.kobj, "array");
+	if (ret)
+		dev_info(&array->dev, "arrays: failed creating symlink\n");
 
 	mutex_lock(&epiphany.driver_lock);
 	/* TODO: roll back if elink is not disconnected */
@@ -1470,6 +1476,9 @@ static void array_unregister(struct array_device *array)
 	struct array_device **arrcurr, **arrprev;
 
 	WARN_ON(!elink);
+
+	if (elink)
+		sysfs_remove_link(&elink->dev.kobj, "array");
 
 	mutex_lock(&epiphany.driver_lock);
 	list_del(&array->list);
@@ -2153,6 +2162,7 @@ static void __init init_epiphany(void)
 
 	atomic_set(&epiphany.elink_counter, 0);
 	atomic_set(&epiphany.mesh_counter, 0);
+	atomic_set(&epiphany.array_counter, 0);
 
 	mutex_init(&epiphany.driver_lock);
 }
