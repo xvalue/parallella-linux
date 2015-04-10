@@ -182,7 +182,7 @@ struct elink_device {
 	struct clk **clocks;
 
 	s16 coreid_pinout; /* core id pinout */
-	bool quirk_coreid_is_noop;
+	bool coreid_is_noop;
 
 	union e_syscfg_version version;
 	enum e_chip_type chip_type;
@@ -1434,7 +1434,7 @@ static int array_register(struct array_device *array,
 	mutex_lock(&epiphany.driver_lock);
 	/* TODO: roll back if elink is not disconnected */
 	WARN_ON(elink->connection.type != E_CONN_DISCONNECTED);
-	if (elink->quirk_coreid_is_noop && array->id != 0x808) {
+	if (elink->coreid_is_noop && array->id != 0x808) {
 		dev_warn(&array->dev,
 			 "arrays: non default id and elink coreid is no-op\n");
 	}
@@ -1710,14 +1710,8 @@ static int elink_probe(struct elink_device *elink)
 		goto err_platform;
 	}
 
-	/* setting coreid in fpga elink regs is a no-op with current
-	 * bitstreams. */
-	if (true) {
-		elink->quirk_coreid_is_noop = true;
+	if (elink->coreid_is_noop)
 		elink->coreid_pinout = reg_read(elink->regs, E_SYS_COREID);
-		dev_dbg(&elink->dev,
-			"elinks: quirk: setting coreid reg is no-op\n");
-	}
 
 	elink->version = version;
 	elink->chip_type = elink_platform_chip_match[version.platform];
@@ -1971,6 +1965,7 @@ err:
 static struct elink_device *elink_of_probe(struct platform_device *pdev)
 {
 	struct elink_device *elink;
+	struct property *prop;
 	struct resource res;
 	u16 coreid;
 	int ret;
@@ -2031,6 +2026,14 @@ static struct elink_device *elink_of_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "Could not get clocks\n");
 		return ERR_PTR(ret);
 	}
+
+	prop = of_find_property(pdev->dev.of_node,
+				"adapteva,no-coreid-pinout", NULL);
+	if (prop) {
+		elink->coreid_is_noop = true;
+		dev_dbg(&pdev->dev, "coreid is no-op\n");
+	}
+
 
 	/* Manually override coreid pinout. Set by array probe otherwise */
 	ret = of_property_read_u16(pdev->dev.of_node, "adapteva,coreid",
