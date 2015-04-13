@@ -342,6 +342,7 @@
 			interrupts = <1 11 0x301>;
 			interrupt-parent = <&intc>;
 			clocks = <&clkc 4>;
+			tied-to-cpu-freq;
 		};
 
 		ttc0: timer@f8001000 {
