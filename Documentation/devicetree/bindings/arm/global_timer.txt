@@ -17,6 +17,10 @@
 
 - clocks : Should be phandle to a clock.
 
+** Timer node optional properties:
+
+- tied-to-cpu-freq : indicates that the timer scales with the CPU frequency.
+
 Example:
 
 	timer@2c000600 {
