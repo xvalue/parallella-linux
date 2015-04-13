@@ -268,6 +268,13 @@ static void __init global_timer_of_register(struct device_node *np)
 		return;
 	}
 
+#ifdef CONFIG_CPU_FREQ
+	if (of_property_read_bool(np, "tied-to-cpu-freq")) {
+		pr_warn("global-timer: tied to cpu frequency, not supported with scaling\n");
+		return;
+	}
+#endif
+
 	gt_clk = of_clk_get(np, 0);
 	if (!IS_ERR(gt_clk)) {
 		err = clk_prepare_enable(gt_clk);
