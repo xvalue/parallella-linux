@@ -1,11 +1,6 @@
 /*
  * Copyright (c) 2014 SUSE LINUX Products GmbH
- *
- * Derived from zynq-zed.dts:
- *
- *  Copyright (C) 2011 Xilinx
- *  Copyright (C) 2012 National Instruments Corp.
- *  Copyright (C) 2013 Xilinx
+ * Copyright (c) 2015 SUSE Linux GmbH
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -17,20 +12,26 @@
  * GNU General Public License for more details.
  */
 /dts-v1/;
-/include/ "zynq-7000.dtsi"
+#include "zynq-parallella1.dtsi"
 
 / {
-	model = "Adapteva Parallella Board";
-	compatible = "adapteva,parallella", "xlnx,zynq-7000";
+	model = "Adapteva Parallella Board with HDMI bitstream";
 
 	memory {
 		device_type = "memory";
 		reg = <0x0 0x40000000>;
 	};
 
-	chosen {
-		bootargs = "console=ttyPS0,115200 earlyprintk root=/dev/mmcblk0p2 rootfstype=ext4 rw rootwait";
-		linux,stdout-path = "/amba/serial@e0001000";
+	hdmi-connector {
+		compatible = "hdmi-connector";
+		type = "d";
+		label = "hdmi";
+
+		port {
+			hdmi_connector_in: endpoint {
+				remote-endpoint = <&adv7513_out>;
+			};
+		};
 	};
 };
 
@@ -51,6 +52,56 @@
 		reg = <0>;
 		marvell,reg-init = <0x3 0x10 0xff00 0x1e>,
 		                   <0x3 0x11 0xfff0 0xa>;
+	};
+};
+
+&usb_phy0 {
+	status = "okay";
+};
+
+&usb_phy1 {
+	status = "okay";
+};
+
+&fpga_axi {
+	axi_vdma: axi-vdma@43000000 {
+		compatible = "xlnx,axi-vdma-1.00.a";
+		reg = <0x43000000 0x1000>;
+		#dma-cells = <1>;
+		xlnx,num-fstores = <3>;
+		xlnx,include-sg = <0>;
+		xlnx,flush-fsync = <2>;
+
+		dma-channel@43000000 {
+			compatible = "xlnx,axi-vdma-mm2s-channel";
+			interrupt-parent = <&intc>;
+			interrupts = <0 59 4>;
+			xlnx,datawidth = <64>;
+			xlnx,include-dre = <0>;
+			xlnx,genlock-mode = <0>;
+		};
+	};
+
+	axi_clkgen: axi-clkgen@66000000 {
+		compatible = "adi,axi-clkgen-1.00.a";
+		reg = <0x66000000 0x10000>;
+		#clock-cells = <0>;
+		clocks = <&clkc 17>;
+	};
+
+	audio_clock: audio-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <12288000>;
+	};
+
+	axi-spdif-tx@75c00000 {
+		compatible = "adi,axi-spdif-tx-1.00.a";
+		reg = <0x75c00000 0x1000>;
+		clocks = <&clkc 15>, <&audio_clock>;
+		clock-names = "axi", "ref";
+		dmas = <&dmac_s 0>;
+		dma-names = "tx";
 	};
 };
 
@@ -79,12 +130,44 @@
 			};
 		};
 	};
+
+	adv7513: hdmi@39 {
+		compatible = "adi,adv7513";
+		reg = <0x39>;
+		adi,input-depth = <8>;
+		adi,input-colorspace = "rgb";
+		adi,input-clock = "1x";
+		adi,input-style = <2>;
+		adi,input-justification = "left";
+		adi,clock-delay = <3>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+
+				adv7513_in: endpoint {
+					/*remote-endpoint = <&dpi_out>;*/
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+
+				adv7513_out: endpoint {
+					remote-endpoint = <&hdmi_connector_in>;
+				};
+			};
+		};
+	};
 };
 
-&sdhci1 {
+&usb0 {
 	status = "okay";
 };
 
-&uart1 {
+&usb1 {
 	status = "okay";
 };
