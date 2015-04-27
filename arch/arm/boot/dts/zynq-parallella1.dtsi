@@ -391,28 +391,24 @@
 	flash@0 {
 		#address-cells = <1>;
 		#size-cells = <1>;
-		compatible = "m25p80";
+		compatible = "micron,n25q128a13";
 		reg = <0x0>;
 		spi-max-frequency = <50000000>;
 		partition@0x00000000 {
 			label = "boot";
-			reg = <0x00000000 0x00500000>;
+			reg = <0x00000000 0x004E0000>;
 		};
-		partition@0x00500000 {
+		partition@0x004e0000 {
 			label = "bootenv";
-			reg = <0x00500000 0x00020000>;
+			reg = <0x004e0000 0x00020000>;
 		};
-		partition@0x00520000 {
-			label = "config";
-			reg = <0x00520000 0x00020000>;
-		};
-		partition@0x00540000 {
-			label = "image";
-			reg = <0x00540000 0x00a80000>;
-		};
-		partition@0x00fc0000 {
-			label = "spare";
-			reg = <0x00fc0000 0x00000000>;
+		partition@0x00ff0000 {
+			label = "version";
+			reg = <0x00ff0000 0x00000000>;
+			/* Offset	Name	Description
+			 * 0x0:		Version	32-bit LSB running number @0x0
+			 * 0x4		Magic	"0x13371338"
+			 */
 		};
 	};
 };
