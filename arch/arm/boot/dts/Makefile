@@ -525,6 +525,7 @@ dtb-$(CONFIG_ARCH_ZYNQ) += \
 	zynq-parallella.dtb \
 	zynq-parallella-headless.dtb \
 	zynq-parallella-microserver.dtb \
+	zynq-parallella-headless-ad9361-fmcomms2-3.dts \
 	zynq-zc702.dtb \
 	zynq-zc706.dtb \
 	zynq-zc770-xm010.dtb \

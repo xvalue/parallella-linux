@@ -1,0 +1,107 @@
+/*
+ * Copyright (c) 2014 SUSE LINUX Products GmbH
+ * Copyright (c) 2015 SUSE Linux GmbH
+ *
+ * This software is licensed under the terms of the GNU General Public
+ * License version 2, as published by the Free Software Foundation, and
+ * may be copied, distributed, and modified under those terms.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+/dts-v1/;
+#include "zynq-parallella1.dtsi"
+
+/ {
+	model = "Adapteva Parallella (headless) with AD9361+FOMCOMMS2";
+};
+
+&usb_phy0 {
+	status = "okay";
+};
+
+&usb_phy1 {
+	status = "okay";
+};
+
+&usb0 {
+	status = "okay";
+};
+
+&usb1 {
+	status = "okay";
+};
+
+&spi0 {
+	status = "okay";
+};
+
+/* Based on "zynq-zc702-adv7511-ad9361-fmcomms2-3.dts" */
+
+#define fmc_spi spi0
+#define fmc_i2c i2c0
+/* "Optional FMCOMMS3 optional Up/Down Converter PMOD" */
+#define pmod_spi spi1
+
+&fpga_axi {
+	rx_dma: dma@7c400000 {
+		compatible = "adi,axi-dmac-1.00.a";
+		reg = <0x7c400000 0x10000>;
+		#dma-cells = <1>;
+		interrupts = <0 57 0>;
+		interrupt-parent = <&intc>;
+		clocks = <&clkc 16>;
+
+		dma-channel {
+			adi,buswidth = <64>;
+			adi,type = <0>;
+		};
+	};
+
+	tx_dma: dma@7c420000 {
+		compatible = "adi,axi-dmac-1.00.a";
+		reg = <0x7c420000 0x10000>;
+		#dma-cells = <1>;
+		interrupts = <0 56 0>;
+		interrupt-parent = <&intc>;
+		clocks = <&clkc 16>;
+
+		dma-channel {
+			adi,buswidth = <64>;
+			adi,type = <1>;
+			adi,cyclic;
+		};
+	};
+
+	cf_ad9361_adc_core_0: cf-ad9361-lpc@79020000 {
+		compatible = "adi,axi-ad9361-6.00.a";
+		reg = <0x79020000 0x6000>;
+		dmas = <&rx_dma 0>;
+		dma-names = "rx";
+		spibus-connected = <&adc0_ad9361>;
+	};
+
+	cf_ad9361_dac_core_0: cf-ad9361-dds-core-lpc@79024000 {
+		compatible = "adi,axi-ad9361-dds-6.00.a";
+		reg = <0x79024000 0x1000>;
+		clocks = <&adc0_ad9361 13>;
+		clock-names = "sampl_clk";
+		dmas = <&tx_dma 0>;
+		dma-names = "tx";
+	};
+};
+
+#include "adi-fmcomms2.dtsi"
+#include "adi-fmcomms3-up-down-converter.dtsi"
+
+/* Should probably be remove */
+//&adc0_ad9361 {
+//	en_agc-gpios = <&gpio 98 0>;
+//	sync-gpios = <&gpio 99 0>;
+//	reset-gpios = <&gpio 100 0>; /* Previously 84 */
+//	enable-gpios = <&gpio 101 0>;
+//	txnrx-gpios = <&gpio 102 0>;
+//};
+
