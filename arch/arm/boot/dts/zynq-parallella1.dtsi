@@ -73,6 +73,14 @@
 
 	elink0: elink0@80000000 {
 	};
+
+	iio_hwmon {
+		compatible = "iio-hwmon";
+		/* 1 temperature channel, and 8 voltage channels */
+		io-channels = <&adc 0>,
+			    <&adc 1>, <&adc 2>, <&adc 3>, <&adc 4>,
+			    <&adc 5>, <&adc 6>, <&adc 7>, <&adc 8>;
+	};
 };
 
 &clkc {
@@ -411,6 +419,7 @@
 };
 
 &adc {
+	#io-channel-cells = <1>;
 	xlnx,channels {
 		#address-cells = <1>;
 		#size-cells = <0>;
