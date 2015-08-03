@@ -233,12 +233,13 @@
 			clock-names = "ref_clk", "fclk0", "fclk1", "fclk2", "fclk3";
 		};
 
-		xadc@f8007100 {
+		adc: xadc@f8007100 {
 		        compatible = "xlnx,zynq-xadc-1.00.a", "xlnx,ps7-xadc-1.00.a";
 			reg = <0xf8007100 0x20>;
 			interrupts = <0 7 4>;
 			interrupt-parent = <&gic>;
 			clocks = <&clkc 12>;
+			#io-channel-cells = <1>;
 		};
 
 		ps7_ddrc_0: ps7-ddrc@f8006000 {
@@ -280,6 +281,14 @@
 				adi,tdms-clock-inversion;
 				adi,clock-delay = <0x3>;
 			};
+		};
+
+		iio_hwmon {
+			compatible = "iio-hwmon";
+			/* 1 temperature channel, and 8 voltage channels */
+			io-channels = <&adc 0>,
+				    <&adc 1>, <&adc 2>, <&adc 3>, <&adc 4>,
+				    <&adc 5>, <&adc 6>, <&adc 7>, <&adc 8>;
 		};
 	};
 };
