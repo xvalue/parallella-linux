@@ -221,12 +221,10 @@ static int epiphany_mmap(struct file *file, struct vm_area_struct *vma)
 
 	vma->vm_ops = &mmap_mem_ops;
 
-	if ((EPIPHANY_MEM_START <= off ) && ((off + size) <= EPIPHANY_MEM_END)) {
-		retval = epiphany_map_device_memory(vma);
-	} else if ((PL_MEM_START <= off ) && ((off + size) <= PL_MEM_END)) {
-		retval = epiphany_map_device_memory(vma);
-	} else if ((HOST_MEM_START <= off) && ((off + size) <= HOST_MEM_END)) {
+	if ((HOST_MEM_START <= off) && ((off + size) <= HOST_MEM_END)) {
 		retval = epiphany_map_host_memory(vma);
+	} else if (HOST_MEM_END <= off) {
+		retval = epiphany_map_device_memory(vma);
 	} else {
 		printk(KERN_DEBUG "epiphany_mmap - invalid request to map "
 				"0x%08lx, length 0x%08lx bytes\n", off, size);
