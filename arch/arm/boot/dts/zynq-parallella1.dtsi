@@ -71,7 +71,7 @@
 		status = "disabled";
 	};
 
-	elink0: elink0@70000000 {
+	elink0: elink0@80000000 {
 	};
 };
 
@@ -100,7 +100,7 @@
 	 * Second range is mappable emesh region.
 	 * _4_ * 64 * (1<<20)
 	 */
-	reg = <0x70000000 0x1000>, <0x80000000 0x10000000>;
+	reg = <0x81000000 0x100000>, <0x80000000 0x10000000>;
 
 	/* (Optional) coreid pin-out register(s) configuration. */
 	/* If we add some constraints we could derive this from the
