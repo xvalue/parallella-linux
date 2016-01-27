@@ -182,6 +182,10 @@ struct elink_device {
 
 	struct clk **clocks;
 
+	/* Power supply */
+	struct regulator *supply;
+	int vdd_wanted;
+
 	s16 coreid_pinout; /* core id pinout */
 	bool coreid_is_noop;
 
@@ -216,9 +220,6 @@ struct array_device {
 	enum e_link_side parent_side; /* Side of array array is connected to to
 					parent elink */
 	struct connection connections[E_SIDE_MAX];
-
-	struct regulator *supply;
-	int vdd_wanted;
 
 	struct mesh_device *mesh;
 
@@ -640,30 +641,35 @@ static void disable_elink(struct elink_device *elink)
 	epiphany_sleep();
 }
 
-static int epiphany_regulator_enable(struct array_device *array)
+static int elink_regulator_enable(struct elink_device *elink)
 {
 	int ret;
 	const struct epiphany_chip_info *cinfo =
-		&epiphany_chip_info[array->chip_type];
+		&epiphany_chip_info[elink->chip_type];
 
-	if (!array->supply)
+	if (!elink->supply)
 		return 0;
 
-	ret = regulator_set_voltage(array->supply, array->vdd_wanted,
+	ret = regulator_set_voltage(elink->supply, elink->vdd_wanted,
 				    cinfo->vdd_max);
 	if (ret)
 		return ret;
 
-	ret = regulator_enable(array->supply);
+	ret = regulator_enable(elink->supply);
 	if (ret)
 		return ret;
 
 	return 0;
 }
 
+static void elink_regulator_disable(struct elink_device *elink)
+{
+	if (elink->supply)
+		regulator_disable(elink->supply);
+}
+
 static int epiphany_reset(void)
 {
-	struct array_device *array;
 	struct elink_device *elink;
 	int err, retval = 0;
 
@@ -671,8 +677,8 @@ static int epiphany_reset(void)
 	 * not call regulator_enable() again since that would screw up the
 	 * regulator's refcount */
 	if (!epiphany.u_count) {
-		list_for_each_entry(array, &epiphany.chip_array_list, list) {
-			if (epiphany_regulator_enable(array)) {
+		list_for_each_entry(elink, &epiphany.elink_list, list) {
+			if (elink_regulator_enable(elink)) {
 				/* Not much else we can do? */
 				retval = -EIO;
 				goto out;
@@ -742,7 +748,6 @@ static int epiphany_get_interruptible(void)
 static void epiphany_put(void)
 {
 	struct elink_device *elink;
-	struct array_device *array;
 
 	mutex_lock(&epiphany.driver_lock);
 
@@ -756,11 +761,8 @@ static void epiphany_put(void)
 	list_for_each_entry(elink, &epiphany.elink_list, list)
 		disable_elink(elink);
 
-	/* ??? TODO: Move arrays to elinks ? */
-	list_for_each_entry(array, &epiphany.chip_array_list, list) {
-		if (array->supply)
-			regulator_disable(array->supply);
-	}
+	list_for_each_entry(elink, &epiphany.elink_list, list)
+		elink_regulator_disable(elink);
 
 	pr_debug("epiphany: no users\n");
 
@@ -1310,146 +1312,18 @@ void mesh_unregister(struct mesh_device *mesh)
 }
 
 
-
-ssize_t array_attr_vdd_current_show(struct device *dev,
-				    struct device_attribute *attr, char *buf)
-{
-	int ret = 0, vdd_curr;
-	struct array_device *array = device_to_array(dev);
-
-	if (mutex_lock_interruptible(&epiphany.driver_lock))
-		return -ERESTARTSYS;
-
-	if (!array->supply) {
-		ret = -ENODEV;
-		goto out;
-	}
-
-	vdd_curr = regulator_get_voltage(array->supply);
-	if (vdd_curr < 0) {
-		ret = vdd_curr;
-		goto out;
-	}
-
-	ret = sprintf(buf, "%d\n", vdd_curr);
-
-out:
-	mutex_unlock(&epiphany.driver_lock);
-	return ret;
-}
-
-ssize_t array_attr_vdd_wanted_show(struct device *dev,
-				   struct device_attribute *attr, char *buf)
-{
-	int ret = 0;
-	struct array_device *array = device_to_array(dev);
-
-	if (mutex_lock_interruptible(&epiphany.driver_lock))
-		return -ERESTARTSYS;
-
-	if (!array->supply) {
-		ret = -ENODEV;
-		goto out;
-	}
-
-	ret = sprintf(buf, "%d\n", array->vdd_wanted);
-
-out:
-	mutex_unlock(&epiphany.driver_lock);
-	return ret;
-}
-
-/* Must hold driver lock before calling this function */
-static int array_set_vdd_wanted(struct array_device *array, int vdd)
-{
-	unsigned int step;
-	const struct epiphany_chip_info *cinfo =
-		&epiphany_chip_info[array->chip_type];
-
-	if (!array->supply)
-		return -ENODEV;
-
-	/* Zero or below resets to default vdd */
-	if (vdd <= 0) {
-		array->vdd_wanted = cinfo->vdd_default;
-		return 0;
-	}
-
-	/* Round vdd down to closest step */
-	step = regulator_get_linear_step(array->supply);
-	vdd = vdd - vdd % step;
-
-	if (vdd < cinfo->vdd_min || cinfo->vdd_max < vdd)
-		return -ERANGE;
-
-	array->vdd_wanted = vdd;
-
-	return 0;
-}
-
-static ssize_t array_attr_vdd_wanted_store(struct device *dev,
-					   struct device_attribute *attr,
-					   const char *buf,
-					   size_t len)
-{
-	struct array_device *array = device_to_array(dev);
-	int ret, data;
-
-	ret = kstrtoint(buf, 10, &data);
-	if (ret < 0)
-		return ret;
-
-	if (mutex_lock_interruptible(&epiphany.driver_lock))
-		return -ERESTARTSYS;
-
-	ret = array_set_vdd_wanted(array, data);
-	if (!ret)
-		ret = len;
-
-	mutex_unlock(&epiphany.driver_lock);
-	return ret;
-}
-
-#define DEVICE_ATTR_PFX(_pfx, _name, _mode, _show, _store) \
-	struct device_attribute dev_attr_##_pfx##_##_name = \
-		__ATTR(_name, _mode, _show, _store)
-
-static DEVICE_ATTR_PFX(array, vdd_current, 0444, array_attr_vdd_current_show,
-		       NULL);
-static DEVICE_ATTR_PFX(array, vdd_wanted, 0644, array_attr_vdd_wanted_show,
-		       array_attr_vdd_wanted_store);
-
-static struct attribute *dev_attrs_array[] = {
-	&dev_attr_array_vdd_current.attr,
-	&dev_attr_array_vdd_wanted.attr,
-	NULL
-};
-
-static struct attribute_group dev_attr_group_array = {
-	.attrs = dev_attrs_array
-};
-
+/* Place holder */
 static const struct attribute_group *dev_attr_groups_array[] = {
-	&dev_attr_group_array,
 	NULL
 };
-
 
 static int array_register(struct array_device *array,
 			  struct elink_device *elink)
 {
-	int ret, boot_vdd;
-	const struct epiphany_chip_info *cinfo =
-		&epiphany_chip_info[elink->chip_type];
+	int ret;
 
 	array->chip_type = elink->chip_type;
-	array->vdd_wanted = cinfo->vdd_default;
-	if (array->supply) {
-		/* Don't override boot vdd if above default */
-		boot_vdd = regulator_get_voltage(array->supply);
-		if (cinfo->vdd_default < boot_vdd && boot_vdd < cinfo->vdd_max)
-			array->vdd_wanted = boot_vdd;
-	}
+
 	array->connections[array->parent_side].type = E_CONN_ELINK;
 	array->connections[array->parent_side].elink = elink;
 
@@ -1545,12 +1419,9 @@ static struct array_device *array_of_probe(struct platform_device *pdev)
 		to_platform_device(pdev->dev.parent);
 	struct elink_device *elink;
 	struct array_device *array;
-	struct device_node *supply_node;
-	struct regulator *supply;
 	enum e_link_side side;
 	u32 reg[4];
 	int ret;
-	const char *supply_name;
 
 	elink = platform_get_drvdata(ppdev);
 	if (!elink) {
@@ -1579,41 +1450,6 @@ static struct array_device *array_of_probe(struct platform_device *pdev)
 	array->chip_rows = reg[2];
 	array->chip_cols = reg[3];
 
-	/* TODO: Support more than one regulator per array */
-	supply_node = of_parse_phandle(pdev->dev.of_node, "vdd-supply", 0);
-	if (!supply_node) {
-		dev_warn(&pdev->dev,
-			 "arrays: no supply node specified, no power management.\n");
-		goto no_supply_node;
-	}
-
-	ret = of_property_read_string(supply_node, "regulator-name",
-				      &supply_name);
-	if (ret) {
-		dev_info(&pdev->dev, "arrays: no regulator name\n");
-		of_node_put(supply_node);
-		return ERR_PTR(ret);
-	}
-
-	supply = devm_regulator_get(&pdev->dev, supply_name);
-	if (IS_ERR(supply)) {
-		ret = PTR_ERR(supply);
-		if (ret == -EPROBE_DEFER) {
-			dev_info(&pdev->dev,
-				 "arrays: %s regulator not ready, retry\n",
-				 supply_node->name);
-		} else {
-			dev_info(&pdev->dev, "arrays: no regulator %s: %d\n",
-				 supply_node->name, ret);
-		}
-		of_node_put(supply_node);
-		return ERR_PTR(ret);
-	}
-
-	of_node_put(supply_node);
-	array->supply = supply;
-
-no_supply_node:
 	switch (side) {
 	case E_SIDE_N ... E_SIDE_W:
 		array->parent_side = side;
@@ -1683,9 +1519,129 @@ static struct platform_driver array_driver = {
 	}
 };
 
+ssize_t elink_attr_vdd_current_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	int ret = 0, vdd_curr;
+	struct elink_device *elink = device_to_elink(dev);
+
+	if (mutex_lock_interruptible(&epiphany.driver_lock))
+		return -ERESTARTSYS;
+
+	if (!elink->supply) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	vdd_curr = regulator_get_voltage(elink->supply);
+	if (vdd_curr < 0) {
+		ret = vdd_curr;
+		goto out;
+	}
+
+	ret = sprintf(buf, "%d\n", vdd_curr);
+
+out:
+	mutex_unlock(&epiphany.driver_lock);
+	return ret;
+}
+
+ssize_t elink_attr_vdd_wanted_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	int ret = 0;
+	struct elink_device *elink = device_to_elink(dev);
+
+	if (mutex_lock_interruptible(&epiphany.driver_lock))
+		return -ERESTARTSYS;
+
+	if (!elink->supply) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	ret = sprintf(buf, "%d\n", elink->vdd_wanted);
+
+out:
+	mutex_unlock(&epiphany.driver_lock);
+	return ret;
+}
+
+/* Must hold driver lock before calling this function */
+static int _elink_attr_vdd_wanted_store(struct elink_device *elink, int vdd)
+{
+	unsigned int step;
+	const struct epiphany_chip_info *cinfo =
+		&epiphany_chip_info[elink->chip_type];
+
+	if (!elink->supply)
+		return -ENODEV;
+
+	/* Zero or below resets to default vdd */
+	if (vdd <= 0) {
+		elink->vdd_wanted = cinfo->vdd_default;
+		return 0;
+	}
+
+	/* Round vdd down to closest step */
+	step = regulator_get_linear_step(elink->supply);
+	vdd = vdd - vdd % step;
+
+	if (vdd < cinfo->vdd_min || cinfo->vdd_max < vdd)
+		return -ERANGE;
+
+	elink->vdd_wanted = vdd;
+
+	return 0;
+}
+
+static ssize_t elink_attr_vdd_wanted_store(struct device *dev,
+					   struct device_attribute *attr,
+					   const char *buf,
+					   size_t len)
+{
+	struct elink_device *elink = device_to_elink(dev);
+	int ret, data;
+
+	ret = kstrtoint(buf, 10, &data);
+	if (ret < 0)
+		return ret;
+
+	if (mutex_lock_interruptible(&epiphany.driver_lock))
+		return -ERESTARTSYS;
+
+	ret = _elink_attr_vdd_wanted_store(elink, data);
+	if (!ret)
+		ret = len;
+
+	mutex_unlock(&epiphany.driver_lock);
+	return ret;
+}
+
+#define DEVICE_ATTR_PFX(_pfx, _name, _mode, _show, _store) \
+	struct device_attribute dev_attr_##_pfx##_##_name = \
+		__ATTR(_name, _mode, _show, _store)
+
+static DEVICE_ATTR_PFX(elink, vdd_current, 0444, elink_attr_vdd_current_show,
+		       NULL);
+static DEVICE_ATTR_PFX(elink, vdd_wanted, 0644, elink_attr_vdd_wanted_show,
+		       elink_attr_vdd_wanted_store);
+
+static struct attribute *dev_attrs_elink[] = {
+	&dev_attr_elink_vdd_current.attr,
+	&dev_attr_elink_vdd_wanted.attr,
+	NULL
+};
+
+static struct attribute_group dev_attr_group_elink = {
+	.attrs = dev_attrs_elink
+};
+
+
 
 /* Place holder */
 static const struct attribute_group *dev_attr_groups_elink[] = {
+	&dev_attr_group_elink,
 	NULL
 };
 
@@ -1736,6 +1692,17 @@ static int elink_probe(struct elink_device *elink)
 	union e_syscfg_version version;
 	int ret = 0;
 
+	/* We must use epiphany_get() / epiphany_put() here so that a release
+	 * of another device (mesh/elink) doesn't drop epiphany.u_count to
+	 * zero. However, since this elink is yet to be added to
+	 * epiphany.elink_list at this stage, we must also explicitly
+	 * enable/disable its power regulator. (The FPGA elink usually gets
+	 * clock from the chip it's connected to) */
+
+	epiphany_get();
+	if (elink_regulator_enable(elink))
+		return -EIO;
+
 	version.reg = reg_read(elink->regs, E_SYS_VERSION);
 
 	if (!version.generation || version.generation >= E_GEN_MAX) {
@@ -1767,17 +1734,28 @@ static int elink_probe(struct elink_device *elink)
 		 version.platform,
 		 version.generation);
 
-	return 0;
-
 err_platform:
 err_generation:
+	elink_regulator_disable(elink);
+	epiphany_put();
+
 	return ret;
 }
 
 static int elink_register(struct elink_device *elink)
 {
-	int ret;
+	int ret, boot_vdd;
 	dev_t devt;
+	const struct epiphany_chip_info *cinfo =
+		&epiphany_chip_info[elink->chip_type];
+
+	elink->vdd_wanted = cinfo->vdd_default;
+	if (elink->supply) {
+		/* Don't override boot vdd if above default */
+		boot_vdd = regulator_get_voltage(elink->supply);
+		if (cinfo->vdd_default < boot_vdd && boot_vdd < cinfo->vdd_max)
+			elink->vdd_wanted = boot_vdd;
+	}
 
 	ret = elink_clks_get(elink);
 	if (ret)
@@ -2004,6 +1982,52 @@ err:
 	return ret;
 }
 
+static int elink_of_probe_supplies(struct platform_device *pdev,
+				   struct elink_device *elink)
+{
+	int ret = 0;
+	struct device_node *supply_node;
+	struct regulator *supply;
+	const char *supply_name;
+
+	/* TODO: Support more than one regulator per elink */
+	supply_node = of_parse_phandle(pdev->dev.of_node, "vdd-supply", 0);
+	if (!supply_node) {
+		dev_warn(&pdev->dev,
+			 "elink: no supply node specified, no power management.\n");
+		return 0;
+	}
+
+	ret = of_property_read_string(supply_node, "regulator-name",
+				      &supply_name);
+	if (ret) {
+		dev_info(&pdev->dev, "elink: no regulator name\n");
+		goto err_name;
+	}
+
+	supply = devm_regulator_get(&pdev->dev, supply_name);
+	if (IS_ERR(supply)) {
+		ret = PTR_ERR(supply);
+		if (ret == -EPROBE_DEFER) {
+			dev_info(&pdev->dev,
+				 "elink: %s regulator not ready, retry\n",
+				 supply_node->name);
+		} else {
+			dev_info(&pdev->dev, "elink: no regulator %s: %d\n",
+				 supply_node->name, ret);
+		}
+		goto err_regulator;
+	}
+
+	elink->supply = supply;
+
+err_name:
+err_regulator:
+	of_node_put(supply_node);
+
+	return ret;
+}
+
 static struct elink_device *elink_of_probe(struct platform_device *pdev)
 {
 	struct elink_device *elink;
@@ -2071,6 +2095,13 @@ static struct elink_device *elink_of_probe(struct platform_device *pdev)
 	if (!elink->regs) {
 		dev_err(&pdev->dev, "Mapping eLink registers failed.\n");
 		return ERR_PTR(-ENOMEM);
+	}
+
+	/* Power regulators */
+	ret = elink_of_probe_supplies(pdev, elink);
+	if (ret) {
+		dev_err(&pdev->dev, "Could not get power supplies\n");
+		return ERR_PTR(ret);
 	}
 
 	/* Clocks */
