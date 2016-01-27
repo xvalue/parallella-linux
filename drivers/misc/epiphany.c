@@ -700,34 +700,58 @@ out:
 	return retval;
 }
 
-static int char_open(struct inode *inode, struct file *file)
+static int _epiphany_get(void)
 {
-	int ret = 0;
-
-	file->private_data = inode->i_cdev;
-
-	if (mutex_lock_interruptible(&epiphany.driver_lock))
-		return -ERESTARTSYS;
+	int ret;
 
 	if (!epiphany.u_count) {
 		/* if !epiphany.param_no_reset (or no power mgmt) */
 		ret = epiphany_reset();
 		if (ret)
-			goto mtx_unlock;
+			return ret;
 	}
 
 	epiphany.u_count++;
 
-mtx_unlock:
+	return ret;
+}
+
+static int epiphany_get(void)
+{
+	int ret;
+
+	mutex_lock(&epiphany.driver_lock);
+	ret = _epiphany_get();
 	mutex_unlock(&epiphany.driver_lock);
 
 	return ret;
 }
 
-static void epiphany_disable(void)
+static int epiphany_get_interruptible(void)
+{
+	int ret;
+
+	if (mutex_lock_interruptible(&epiphany.driver_lock))
+		return -ERESTARTSYS;
+	ret = _epiphany_get();
+	mutex_unlock(&epiphany.driver_lock);
+
+	return ret;
+}
+
+static void epiphany_put(void)
 {
 	struct elink_device *elink;
 	struct array_device *array;
+
+	mutex_lock(&epiphany.driver_lock);
+
+	epiphany.u_count--;
+
+	if (epiphany.u_count) {
+		mutex_unlock(&epiphany.driver_lock);
+		return;
+	}
 
 	list_for_each_entry(elink, &epiphany.elink_list, list)
 		disable_elink(elink);
@@ -738,22 +762,22 @@ static void epiphany_disable(void)
 			regulator_disable(array->supply);
 	}
 
+	pr_debug("epiphany: no users\n");
+
+	mutex_unlock(&epiphany.driver_lock);
+}
+
+static int char_open(struct inode *inode, struct file *file)
+{
+	file->private_data = inode->i_cdev;
+
+	return epiphany_get_interruptible();
 }
 
 static int char_release(struct inode *inode, struct file *file)
 {
-	/* Not sure if interruptible is a good idea here ... */
-	mutex_lock(&epiphany.driver_lock);
+	epiphany_put();
 
-	epiphany.u_count--;
-
-	if (!epiphany.u_count) {
-		/* if (!epiphany.param_no_powersave) */
-		epiphany_disable();
-		pr_debug("epiphany: no users\n");
-	}
-
-	mutex_unlock(&epiphany.driver_lock);
 	return 0;
 }
 
