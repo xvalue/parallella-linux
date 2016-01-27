@@ -189,6 +189,7 @@
 			};
 			ldo1 {
 				regulator-name = "VDD_ADJ";
+				regulator-always-on;
 			};
 			ldo2 {
 				regulator-name = "VDD_GPIO";
