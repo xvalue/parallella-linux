@@ -816,6 +816,14 @@ static int _elink_char_mmap(struct elink_device *elink,
 		}
 	}
 
+	if (elink->regs_start <= off &&
+	    off + size <= elink->regs_start + elink->regs_size) {
+		if (epiphany.param_unsafe_access)
+			return epiphany_map_memory(vma, true);
+		else
+			return -EACCES;
+	}
+
 	/* TODO: Need a fault handler to make this safe. We want to allow
 	 * mmapping an entire mesh/chip, which means there can be holes which
 	 * should result in segfaults if accessed. */
@@ -826,11 +834,6 @@ static int _elink_char_mmap(struct elink_device *elink,
 		vma->vm_pgoff = phys_off >> PAGE_SHIFT;
 		return epiphany_map_memory(vma, true);
 	}
-
-	if (epiphany.param_unsafe_access &&
-	    elink->regs_start <= off &&
-	    off + size <= elink->regs_start + elink->regs_size)
-		return epiphany_map_memory(vma, true);
 
 	dev_dbg(&elink->dev,
 		"elink_char_mmap: invalid request to map 0x%08lx, length 0x%08lx bytes\n",
@@ -2001,23 +2004,8 @@ static struct elink_device *elink_of_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "no control reg resource\n");
 		return ERR_PTR(ret);
 	}
-
-	if (!devm_request_mem_region(&pdev->dev, res.start,
-				     resource_size(&res), pdev->name)) {
-		dev_err(&pdev->dev,
-			"failed requesting control reg mem region\n");
-		return ERR_PTR(-ENOMEM);
-	}
-
 	elink->regs_start = res.start;
 	elink->regs_size = resource_size(&res);
-	elink->regs = devm_ioremap_nocache(&pdev->dev, elink->regs_start,
-					   elink->regs_size);
-
-	if (!elink->regs) {
-		dev_err(&pdev->dev, "Mapping eLink registers failed.\n");
-		return ERR_PTR(-ENOMEM);
-	}
 
 	/* Host bus slave address range for emesh */
 	ret = of_address_to_resource(pdev->dev.of_node, 1, &res);
@@ -2025,15 +2013,41 @@ static struct elink_device *elink_of_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "no bus resource\n");
 		return ERR_PTR(ret);
 	}
+	elink->emesh_start = res.start;
+	elink->emesh_size = resource_size(&res);
 
-	if (!devm_request_mem_region(&pdev->dev, res.start,
-				     resource_size(&res), pdev->name)) {
+
+	/* don't accept regs overlapping mesh region */
+	if (elink->regs_start < elink->emesh_start &&
+	    elink->emesh_start < elink->regs_start + elink->regs_size) {
+		dev_err(&pdev->dev,
+			"elink regs overlapping emesh memory region\n");
+			return ERR_PTR(-EINVAL);
+	}
+
+	/* accept regs fully inside mesh region */
+	if (elink->regs_start + elink->regs_size <= elink->emesh_start ||
+	    elink->emesh_start + elink->emesh_size <= elink->regs_start) {
+		if (!devm_request_mem_region(&pdev->dev, elink->regs_start,
+					     elink->regs_size, pdev->name)) {
+			dev_err(&pdev->dev,
+				"failed requesting control reg mem region\n");
+			return ERR_PTR(-ENOMEM);
+		}
+	}
+
+	if (!devm_request_mem_region(&pdev->dev, elink->emesh_start,
+				     elink->emesh_size, pdev->name)) {
 		dev_err(&pdev->dev, "failed requesting emesh mem region\n");
 		return ERR_PTR(-ENOMEM);
 	}
 
-	elink->emesh_start = res.start;
-	elink->emesh_size = resource_size(&res);
+	elink->regs = devm_ioremap_nocache(&pdev->dev, elink->regs_start,
+					   elink->regs_size);
+	if (!elink->regs) {
+		dev_err(&pdev->dev, "Mapping eLink registers failed.\n");
+		return ERR_PTR(-ENOMEM);
+	}
 
 	/* Clocks */
 	ret = elink_of_probe_clks(pdev, elink);
