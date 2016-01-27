@@ -118,18 +118,17 @@
 	 * anyways. And if not this is the only mapping we will allow */
 	adapteva,mmu = <0x8e000000 0x3e000000 0x02000000>;
 
+	/* Optional power / thermal control. Will not implement much for
+	 * now but will read supply voltage to check if we can
+	 * run chip elink TX at full speed. Can be a list. */
+	vdd-supply = <&regulator_epiphany>; /* Can be a list */
+	/*io-channels = <&adc 0>;*/
+	/*io-channel-names = "zynq_temp";*/
+
 	array0@808 {
 		compatible = "adapteva,chip-array";
 		/* North-westmost coreid, #NESW, #chip rows, #chip cols */
 		reg = <0x808 1 1 1>;
-
-		/* TODO: Move to elink node? */
-		/* Optional power / thermal control. Will not implement much for
-		 * now but will read supply voltage to check if we can
-		 * run chip elink TX at full speed. Can be a list. */
-		vdd-supply = <&regulator_epiphany>; /* Can be a list */
-		/*io-channels = <&adc 0>;*/
-		/*io-channel-names = "zynq_temp";*/
 
 /*
 		// reg North=0, East=1, South=2, West=3
