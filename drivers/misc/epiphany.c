@@ -189,7 +189,7 @@ struct elink_device {
 	s16 coreid_pinout; /* core id pinout */
 	bool coreid_is_noop;
 
-	union e_syscfg_version version;
+	union elink_version version;
 	enum e_chip_type chip_type;
 
 	struct connection connection;
@@ -341,7 +341,7 @@ static void elink_disable_chip_elink(struct elink_device *elink,
 	phys_addr_t core_phys, regs_phys;
 	u16 coreid;
 	void __iomem *regs;
-	union e_syscfg_tx txcfg;
+	union elink_txcfg txcfg;
 
 	coreid = chipid + cinfo->elink_coreid[side];
 
@@ -360,15 +360,15 @@ static void elink_disable_chip_elink(struct elink_device *elink,
 	if (!regs)
 		return;
 
-	txcfg.reg = reg_read(elink->regs, E_SYS_CFGTX);
+	txcfg.reg = reg_read(elink->regs, ELINK_TXCFG);
 	txcfg.ctrlmode = ctrlmode_hints[side];
-	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
+	reg_write(txcfg.reg, elink->regs, ELINK_TXCFG);
 
 	reg_write(0xfff, regs, E_REG_LINKTXCFG & ~PAGE_MASK);
 	reg_write(0xfff, regs, E_REG_LINKRXCFG & ~PAGE_MASK);
 
 	txcfg.ctrlmode = 0;
-	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
+	reg_write(txcfg.reg, elink->regs, ELINK_TXCFG);
 
 	iounmap(regs);
 }
@@ -479,7 +479,7 @@ static int configure_chip_tx_divider(struct elink_device *elink,
 	phys_addr_t core_phys, regs_phys;
 	u16 coreid;
 	void __iomem *regs;
-	union e_syscfg_tx txcfg;
+	union elink_txcfg txcfg;
 	u32 offset;
 
 
@@ -492,7 +492,7 @@ static int configure_chip_tx_divider(struct elink_device *elink,
 	dev_dbg(&elink->dev,
 		"chip requires programming the link clock divider.\n");
 
-	txcfg.reg = reg_read(elink->regs, E_SYS_CFGTX);
+	txcfg.reg = reg_read(elink->regs, ELINK_TXCFG);
 	txcfg.ctrlmode = ctrlmode_hints[side];
 
 	err = coreid_to_phys(elink, coreid, &core_phys);
@@ -507,14 +507,14 @@ static int configure_chip_tx_divider(struct elink_device *elink,
 	if (!regs)
 		return -EIO;
 
-	txcfg.reg = reg_read(elink->regs, E_SYS_CFGTX);
+	txcfg.reg = reg_read(elink->regs, ELINK_TXCFG);
 	txcfg.ctrlmode = ctrlmode_hints[side];
-	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
+	reg_write(txcfg.reg, elink->regs, ELINK_TXCFG);
 
 	reg_write(cinfo->linkcfg_tx_divider, regs, offset);
 
 	txcfg.ctrlmode = 0;
-	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
+	reg_write(txcfg.reg, elink->regs, ELINK_TXCFG);
 
 	iounmap(regs);
 	return 0;
@@ -565,78 +565,53 @@ static int configure_adjacent_links(struct elink_device *elink)
 /* Reset the Epiphany platform */
 static int reset_elink(struct elink_device *elink)
 {
-	int retval = 0;
-	union e_syscfg_tx txcfg = {0};
-	union e_syscfg_rx rxcfg = {0};
-	union e_syscfg_clk clkcfg = {0};
+	int ret = 0;
+	union elink_reset reset = {0};
+	union elink_txcfg txcfg = {0};
+	union elink_rxcfg rxcfg = {0};
 
 	epiphany_sleep();
 
-	/* Assert reset */
-	reg_write(1, elink->regs, E_SYS_RESET);
-
-	/* Disable TX */
-	txcfg.reg = 0;
-	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
-
-	/* Disable RX */
-	rxcfg.reg = 0;
-	reg_write(rxcfg.reg, elink->regs, E_SYS_CFGRX);
-
-	/* Start C-clock */
-	clkcfg.divider = 7; /* Full speed */
-	reg_write(clkcfg.reg, elink->regs, E_SYS_CFGCLK);
-
-	/* Stop C-clock for setup/hold time on reset */
-	clkcfg.divider = 0;
-	reg_write(clkcfg.reg, elink->regs, E_SYS_CFGCLK);
-
-	/* Configure core id. Here should be the right place? clocks disabled
-	 * and reset asserted. */
-	reg_write(elink->coreid_pinout, elink->regs, E_SYS_COREID);
-
-	/* Deassert reset */
-	reg_write(0, elink->regs, E_SYS_RESET);
-
-	/* Restart C-clock */
-	clkcfg.divider = 7; /* Full speed */
-	reg_write(clkcfg.reg, elink->regs, E_SYS_CFGCLK);
-
-	/* Start TX L-clock */
-	txcfg.clkmode = 0; /* Full speed */
-	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
-
-	/* enable eLink TX */
-	txcfg.enable  = 1;
-	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
-
-	/* Enable eLink RX */
-	rxcfg.enable = 1;
-	reg_write(rxcfg.reg, elink->regs, E_SYS_CFGRX);
-
-	retval = configure_adjacent_links(elink);
+	/* assert reset */
+	reset.tx_reset = 1;
+	reset.rx_reset = 1;
+	reg_write(reset.reg, elink->regs, ELINK_RESET);
 
 	epiphany_sleep();
-	return retval;
+
+	/* de-assert reset */
+	reset.tx_reset = 0;
+	reset.rx_reset = 0;
+	reg_write(reset.reg, elink->regs, ELINK_RESET);
+
+	epiphany_sleep();
+
+	reg_write(elink->coreid_pinout, elink->regs, ELINK_CHIPID);
+
+	txcfg.enable = 1;
+	reg_write(txcfg.reg, elink->regs, ELINK_TXCFG);
+
+	/* TODO: From configuration */
+	rxcfg.remap_mode = 1;
+	rxcfg.remap_sel = 0xfe0;
+	rxcfg.remap_pattern = 0x3e0;
+	reg_write(rxcfg.reg, elink->regs, ELINK_RXCFG);
+
+	ret = configure_adjacent_links(elink);
+
+	epiphany_sleep();
+	return ret;
 }
 
 static void disable_elink(struct elink_device *elink)
 {
-	union e_syscfg_clk clkcfg;
-	union e_syscfg_tx txcfg;
-	union e_syscfg_rx rxcfg;
+	union elink_txcfg txcfg = { .enable = 0 };
+	union elink_reset reset = { .tx_reset = 1, .rx_reset = 1 };
 
-	clkcfg.reg = reg_read(elink->regs, E_SYS_CFGCLK);
-	txcfg.reg = reg_read(elink->regs, E_SYS_CFGTX);
-	rxcfg.reg = reg_read(elink->regs, E_SYS_CFGRX);
+	reg_write(txcfg.reg, elink->regs, ELINK_TXCFG);
+	/* TODO: Don't we also need rxcfg.enable -> 0 ??? */
 
-	clkcfg.divider = 0;
-	txcfg.enable = 0;
-	rxcfg.enable = 0;
-
-	reg_write(clkcfg.reg, elink->regs, E_SYS_CFGCLK);
-	reg_write(txcfg.reg, elink->regs, E_SYS_CFGTX);
-	reg_write(rxcfg.reg, elink->regs, E_SYS_CFGRX);
+	reg_write(reset.reg, elink->regs, ELINK_RESET);
 
 	epiphany_sleep();
 }
@@ -1689,7 +1664,7 @@ static void elink_clks_put(struct elink_device *elink)
 
 static int elink_probe(struct elink_device *elink)
 {
-	union e_syscfg_version version;
+	union elink_version version;
 	int ret = 0;
 
 	/* We must use epiphany_get() / epiphany_put() here so that a release
@@ -1703,13 +1678,14 @@ static int elink_probe(struct elink_device *elink)
 	if (elink_regulator_enable(elink))
 		return -EIO;
 
-	version.reg = reg_read(elink->regs, E_SYS_VERSION);
+	reset_elink(elink);
 
-	if (!version.generation || version.generation >= E_GEN_MAX) {
-		dev_err(&elink->dev, "elink: unsupported generation: 0x%x.\n",
-			version.generation);
-		ret = -EINVAL;
-		goto err_generation;
+	version.reg = reg_read(elink->regs, ELINK_VERSION);
+	/* HACK: This is 0 in current FPGA elink, guess default.*/
+	if (!version.reg) {
+		dev_warn(&elink->dev,
+			 "elink: version field empty. Using default platform.\n");
+		version.platform = E_PLATF_E16_7Z020_GPIO;
 	}
 
 	if (!version.platform || version.platform >= E_PLATF_MAX) {
@@ -1720,22 +1696,18 @@ static int elink_probe(struct elink_device *elink)
 	}
 
 	if (elink->coreid_is_noop)
-		elink->coreid_pinout = reg_read(elink->regs, E_SYS_COREID);
+		elink->coreid_pinout = reg_read(elink->regs, ELINK_CHIPID);
 
 	elink->version = version;
 	elink->chip_type = elink_platform_chip_match[version.platform];
 
 	dev_info(&elink->dev, "Epiphany FPGA elink at address %pa\n",
 		 &elink->regs_start);
-	dev_info(&elink->dev,
-		 "revision %02x type %02x platform %02x generation %02x\n",
-		 version.revision,
-		 version.type,
+	dev_info(&elink->dev, "platform %02x revision %02x\n",
 		 version.platform,
-		 version.generation);
+		 version.revision);
 
 err_platform:
-err_generation:
 	elink_regulator_disable(elink);
 	epiphany_put();
 
