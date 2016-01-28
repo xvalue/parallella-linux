@@ -4,16 +4,87 @@
 #include <uapi/misc/epiphany.h>
 
 /* Epiphany system registers */
-enum e_sys_reg_id {
-	E_SYS_RESET		= 0x0040,
-	E_SYS_CFGTX		= 0x0044,
-	E_SYS_CFGRX		= 0x0048,
-	E_SYS_CFGCLK		= 0x004c,
-	E_SYS_COREID		= 0x0050,
-	E_SYS_VERSION		= 0x0054,
-	E_SYS_GPIOIN		= 0x0058,
-	E_SYS_GPIOOUT		= 0x005c
+enum e_elink_regs {
+	ELINK_RESET		= 0xF0200,
+	ELINK_CLK		= 0xF0204,
+	ELINK_CHIPID		= 0xF0208,
+	ELINK_VERSION		= 0xF020C,
+	ELINK_TXCFG		= 0xF0210,
+	ELINK_TXSTATUS		= 0xF0214,
+	ELINK_TXGPIO		= 0xF0218,
+	ELINK_TXMONITOR		= 0xF021C,
+	ELINK_TXPACKET		= 0xF0220,
+	ELINK_RXCFG		= 0xF0300,
+	ELINK_RXSTATUS		= 0xF0304,
+	ELINK_RXGPIO		= 0xF0308,
+	ELINK_RXOFFSET		= 0xF030C,
+	ELINK_RXDELAY0		= 0xF0310,
+	ELINK_RXDELAY1		= 0xF0314,
+	ELINK_RXTESTDATA	= 0xF0318,
+	ELINK_MAILBOXLO		= 0xF0730,
+	ELINK_MAILBOXHI		= 0xF0734,
+	ELINK_MAILBOXSTAT	= 0xF0738,
+	ELINK_TXMMU		= 0xE0000,
+	ELINK_RXMMU		= 0xE8000,
 };
+
+union elink_reset {
+	u32 reg;
+	struct {
+		unsigned tx_reset:1;
+		unsigned rx_reset:1;
+	};
+} __packed;
+
+union elink_chipid {
+	u32 reg;
+	union {
+		struct {
+			unsigned corecol:6;
+			unsigned corerow:6;
+		};
+		struct {
+			unsigned:2;
+			unsigned chipcol;
+			unsigned:2;
+			unsigned chiprow;
+		};
+	};
+} __packed;
+
+union elink_version {
+	u32 reg;
+	struct {
+		unsigned platform:8;
+		unsigned revision:8;
+	};
+} __packed;
+
+union elink_txcfg {
+	u32 reg;
+	struct {
+		unsigned enable:1;
+		unsigned mmu_enable:1;
+		unsigned remap_mode:2;
+		unsigned ctrlmode:4;
+		unsigned:1;
+		unsigned ctrlmode_bypass:1;
+		unsigned burst_enable:1;
+		unsigned transmit_mode:2;
+	};
+} __packed;
+
+union elink_rxcfg {
+	u32 reg;
+	struct {
+		unsigned test_mode:1;
+		unsigned mmu_enable:1;
+		unsigned remap_mode:2;
+		unsigned remap_sel:12;
+		unsigned remap_pattern:12;
+		unsigned mailbox_irq_en:1;
+	};
+} __packed;
 
 /* Chip registers */
 enum e_chip_regs {
@@ -44,70 +115,6 @@ enum e_core_reg {
 	E_REG_BASE		= 0xf0000,
 	E_REG_CONFIG		= 0xf0400,
 	E_REG_MESHCONFIG	= 0xf0700
-};
-
-union e_syscfg_tx {
-	u32 reg;
-	struct {
-		unsigned int enable:1;
-		unsigned int mmu:1;
-		unsigned int mode:2;      /* 0=Normal, 1=GPIO */
-		unsigned int ctrlmode:4;
-		unsigned int clkmode:4;   /* 0=Full speed, 1=1/2 speed */
-		unsigned int resvd:20;
-	};
-};
-
-union e_syscfg_rx {
-	u32 reg;
-	struct {
-		unsigned int enable:1;
-		unsigned int mmu:1;
-		unsigned int path:2;    /* 0=Normal, 1=GPIO, 2=Loopback */
-		unsigned int monitor:1;
-		unsigned int resvd:27;
-	};
-};
-
-union e_syscfg_clk {
-	u32 reg;
-	struct {
-		unsigned int divider:4;  /* 0=off, 1=F/64 ... 7=F/1 */
-		unsigned int pll:4;      /* TBD */
-		unsigned int resvd:24;
-	};
-};
-
-union e_syscfg_coreid {
-	u32 reg;
-	struct {
-		unsigned int col:6;
-		unsigned int row:6;
-		unsigned int resvd:20;
-	};
-};
-
-union e_syscfg_version {
-	u32 reg;
-	struct {
-		unsigned int revision:8;
-		unsigned int type:8;
-		unsigned int platform:8;
-		unsigned int generation:7;
-		unsigned int debug:1;
-	};
-};
-
-/* The following is for E_SYS_GPIOIN and E_SYS_GPIOOUT */
-union e_syscfg_gpio {
-	u32 reg;
-	struct {
-		unsigned int data:8;
-		unsigned int frame:1;
-		unsigned int wait_rd:1;
-		unsigned int wait_wr:1;
-		unsigned int resvd:21;
-	};
 };
 
 #endif /* __EPIPHANY_H__ */
