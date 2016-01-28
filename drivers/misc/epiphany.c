@@ -246,18 +246,15 @@ struct mem_region {
 	phandle phandle;
 };
 
-/* TODO: Sledge-hammer approach. Needed on some Kickstarter boards. Ultimately
- * these long sleeps should only be needed when modifying clocks. */
-static inline void epiphany_sleep(void)
-{
-	usleep_range(2000, 2100);
-}
-
 static inline void reg_write(u32 value, void __iomem *base, u32 offset)
 {
 	iowrite32(value, (u8 __iomem *)base + offset);
-	/* Sledge hammer fix. See comment for epiphany_sleep() */
-	epiphany_sleep();
+
+	/* TODO: With the new OH elink this does not seem to be needed anymore.
+	 * Remove comment when the code has been tested on more boards.
+	 * Sledge-hammer approach. Needed on some Kickstarter boards. Ultimately
+	 * these long sleeps should only be needed when modifying clocks. */
+	/* usleep_range(2000, 2100); */
 }
 
 static inline u32 reg_read(void __iomem *base, u32 offset)
@@ -570,21 +567,19 @@ static int reset_elink(struct elink_device *elink)
 	union elink_txcfg txcfg = {0};
 	union elink_rxcfg rxcfg = {0};
 
-	epiphany_sleep();
-
 	/* assert reset */
 	reset.tx_reset = 1;
 	reset.rx_reset = 1;
 	reg_write(reset.reg, elink->regs, ELINK_RESET);
 
-	epiphany_sleep();
+	usleep_range(10, 100);
 
 	/* de-assert reset */
 	reset.tx_reset = 0;
 	reset.rx_reset = 0;
 	reg_write(reset.reg, elink->regs, ELINK_RESET);
 
-	epiphany_sleep();
+	usleep_range(10, 100);
 
 	reg_write(elink->coreid_pinout, elink->regs, ELINK_CHIPID);
 
@@ -597,9 +592,10 @@ static int reset_elink(struct elink_device *elink)
 	rxcfg.remap_pattern = 0x3e0;
 	reg_write(rxcfg.reg, elink->regs, ELINK_RXCFG);
 
+	usleep_range(10, 100);
+
 	ret = configure_adjacent_links(elink);
 
-	epiphany_sleep();
 	return ret;
 }
 
@@ -613,7 +609,7 @@ static void disable_elink(struct elink_device *elink)
 
 	reg_write(reset.reg, elink->regs, ELINK_RESET);
 
-	epiphany_sleep();
+	usleep_range(10, 100);
 }
 
 static int elink_regulator_enable(struct elink_device *elink)
@@ -633,6 +629,8 @@ static int elink_regulator_enable(struct elink_device *elink)
 	ret = regulator_enable(elink->supply);
 	if (ret)
 		return ret;
+
+	usleep_range(100, 200);
 
 	return 0;
 }
