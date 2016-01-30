@@ -560,7 +560,7 @@ static int configure_adjacent_links(struct elink_device *elink)
 }
 
 /* Reset the Epiphany platform */
-static int reset_elink(struct elink_device *elink)
+static int elink_reset(struct elink_device *elink)
 {
 	int ret = 0;
 	union elink_reset reset = {0};
@@ -599,7 +599,7 @@ static int reset_elink(struct elink_device *elink)
 	return ret;
 }
 
-static void disable_elink(struct elink_device *elink)
+static void elink_disable(struct elink_device *elink)
 {
 	union elink_txcfg txcfg = { .enable = 0 };
 	union elink_reset reset = { .tx_reset = 1, .rx_reset = 1 };
@@ -660,7 +660,7 @@ static int epiphany_reset(void)
 	}
 
 	list_for_each_entry(elink, &epiphany.elink_list, list) {
-		err = reset_elink(elink);
+		err = elink_reset(elink);
 		if (err) {
 			retval = -EIO;
 			goto out;
@@ -732,7 +732,7 @@ static void epiphany_put(void)
 	}
 
 	list_for_each_entry(elink, &epiphany.elink_list, list)
-		disable_elink(elink);
+		elink_disable(elink);
 
 	list_for_each_entry(elink, &epiphany.elink_list, list)
 		elink_regulator_disable(elink);
@@ -1676,7 +1676,7 @@ static int elink_probe(struct elink_device *elink)
 	if (elink_regulator_enable(elink))
 		return -EIO;
 
-	reset_elink(elink);
+	elink_reset(elink);
 
 	version.reg = reg_read(elink->regs, ELINK_VERSION);
 	/* HACK: This is 0 in current FPGA elink, guess default.*/
