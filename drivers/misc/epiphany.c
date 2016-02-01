@@ -622,6 +622,10 @@ static int configure_adjacent_links(struct elink_device *elink)
 /* Reset the Epiphany platform */
 static int elink_reset(struct elink_device *elink)
 {
+	/* TODO: Should be able to provide via device tree */
+	const u32 rxdelay0 = 0xaaaaaaaa;
+	const u32 rxdelay1 = 0x0000000a;
+
 	int ret = 0;
 	union elink_reset reset = {0};
 	union elink_txcfg txcfg = {0};
@@ -642,6 +646,9 @@ static int elink_reset(struct elink_device *elink)
 	usleep_range(10, 100);
 
 	reg_write(elink->coreid_pinout, elink->regs, ELINK_CHIPID);
+
+	reg_write(rxdelay0, elink->regs, ELINK_RXDELAY0);
+	reg_write(rxdelay1, elink->regs, ELINK_RXDELAY1);
 
 	txcfg.enable = 1;
 	reg_write(txcfg.reg, elink->regs, ELINK_TXCFG);
