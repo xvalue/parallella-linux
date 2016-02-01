@@ -80,6 +80,18 @@ static const u32 ctrlmode_hints[E_SIDE_MAX] = {
 	[E_SIDE_W] = E_CTRLMODE_WEST
 };
 
+enum performance_state {
+	E_PS_HIGHEST = 0,
+	E_PS_LOWEST,
+	E_PS_NUM_STATES
+};
+
+struct performance_state_cfg {
+	int vdd_thresh;
+
+	u32 linkcfg_tx_divider;
+};
+
 struct epiphany_chip_info {
 	int rows;
 	int cols;
@@ -87,11 +99,12 @@ struct epiphany_chip_info {
 	u16 elink_coreid[E_SIDE_MAX]; /* relative */
 
 	/* In uVolts */
-	int vdd_default;
 	int vdd_min;
 	int vdd_max;
 
 	u32 linkcfg_tx_divider;
+
+	struct performance_state_cfg perf_state[E_PS_NUM_STATES];
 };
 static const struct epiphany_chip_info epiphany_chip_info[E_CHIP_MAX] = {
 	[E_CHIP_E16G301] = {
@@ -105,11 +118,22 @@ static const struct epiphany_chip_info epiphany_chip_info[E_CHIP_MAX] = {
 		.elink_coreid[E_SIDE_W] = COORDS(2, 0),
 
 		/* Recommended operating conditions */
-		.vdd_default	= 1000000,
 		.vdd_min	=  900000,
 		.vdd_max	= 1200000,
 
-		.linkcfg_tx_divider = 1
+		.linkcfg_tx_divider = 1,
+
+		.perf_state = {
+			[E_PS_HIGHEST] = {
+				.vdd_thresh = 1000000,
+				.linkcfg_tx_divider = 0
+			},
+			/* TODO: Verify */
+			[E_PS_LOWEST] = {
+				.vdd_thresh = 900000,
+				.linkcfg_tx_divider = 1
+			}
+		}
 	},
 	[E_CHIP_E64G401] = {
 		.rows = 8,
@@ -122,12 +146,22 @@ static const struct epiphany_chip_info epiphany_chip_info[E_CHIP_MAX] = {
 		.elink_coreid[E_SIDE_W] = COORDS(2, 0),
 
 		/* Recommended operating conditions */
-		.vdd_default	= 1000000,
 		.vdd_min	=  900000,
 		.vdd_max	= 1100000,
 
+		.linkcfg_tx_divider = 0,
+
 		/* TODO: Verify */
-		.linkcfg_tx_divider = 0
+		.perf_state = {
+			[E_PS_HIGHEST] = {
+				.vdd_thresh = 1000000,
+				.linkcfg_tx_divider = 0
+			},
+			[E_PS_LOWEST] = {
+				.vdd_thresh = 900000,
+				.linkcfg_tx_divider = 1
+			}
+		}
 	}
 };
 
@@ -245,6 +279,33 @@ struct mem_region {
 
 	phandle phandle;
 };
+
+/* Return the maximum performance state the chip array can currently do, not
+ * taking its neighbours into account */
+static enum performance_state
+array_get_max_perf_state(const struct array_device *array)
+{
+	int curr_vdd;
+	enum performance_state i;
+	struct elink_device *elink;
+	const struct epiphany_chip_info *cinfo =
+		&epiphany_chip_info[array->chip_type];
+
+	elink = array->connections[array->parent_side].elink;
+
+	if (!elink || !elink->supply)
+		return E_PS_LOWEST;
+
+	curr_vdd = regulator_get_voltage(elink->supply);
+	for (i = E_PS_HIGHEST; i < E_PS_NUM_STATES; i++) {
+		if (curr_vdd >= cinfo->perf_state[i].vdd_thresh)
+			return i;
+	}
+
+	/* Out of spec */
+
+	return E_PS_LOWEST;
+}
 
 static inline void reg_write(u32 value, void __iomem *base, u32 offset)
 {
@@ -475,19 +536,16 @@ static int configure_chip_tx_divider(struct elink_device *elink,
 		&epiphany_chip_info[array->chip_type];
 	phys_addr_t core_phys, regs_phys;
 	u16 coreid;
+	u32 divider;
 	void __iomem *regs;
 	union elink_txcfg txcfg;
 	u32 offset;
+	enum performance_state ps;
 
-
-	/* Figure out which divider we need for the TX reg */
-	if (!cinfo->linkcfg_tx_divider)
-		return 0;
+	ps = array_get_max_perf_state(elink->connection.array);
+	divider = cinfo->perf_state[ps].linkcfg_tx_divider;
 
 	coreid = chipid + cinfo->elink_coreid[side];
-
-	dev_dbg(&elink->dev,
-		"chip requires programming the link clock divider.\n");
 
 	txcfg.reg = reg_read(elink->regs, ELINK_TXCFG);
 	txcfg.ctrlmode = ctrlmode_hints[side];
@@ -508,7 +566,7 @@ static int configure_chip_tx_divider(struct elink_device *elink,
 	txcfg.ctrlmode = ctrlmode_hints[side];
 	reg_write(txcfg.reg, elink->regs, ELINK_TXCFG);
 
-	reg_write(cinfo->linkcfg_tx_divider, regs, offset);
+	reg_write(divider, regs, offset);
 
 	txcfg.ctrlmode = 0;
 	reg_write(txcfg.reg, elink->regs, ELINK_TXCFG);
@@ -527,6 +585,8 @@ static int configure_adjacent_links(struct elink_device *elink)
 
 	if (elink->connection.type != E_CONN_ARRAY)
 		return 0;
+
+	BUG_ON(!elink->connection.array);
 
 	array = elink->connection.array;
 	cinfo = &epiphany_chip_info[array->chip_type];
@@ -614,25 +674,54 @@ static void elink_disable(struct elink_device *elink)
 
 static int elink_regulator_enable(struct elink_device *elink)
 {
-	int ret;
+	int ret, i, old_vdd, new_vdd, step, wiggle;
 	const struct epiphany_chip_info *cinfo =
 		&epiphany_chip_info[elink->chip_type];
 
 	if (!elink->supply)
 		return 0;
 
-	ret = regulator_set_voltage(elink->supply, elink->vdd_wanted,
-				    cinfo->vdd_max);
+	old_vdd = regulator_get_voltage(elink->supply);
+	if (old_vdd < 0)
+		return old_vdd;
+
+	new_vdd = min(old_vdd, cinfo->vdd_max);
+	step = regulator_get_linear_step(elink->supply);
+
+	ret = -EINVAL;
+
+	if (cinfo->vdd_min <= elink->vdd_wanted &&
+	    elink->vdd_wanted <= cinfo->vdd_max) {
+		new_vdd = elink->vdd_wanted;
+		wiggle = min(new_vdd + step, cinfo->vdd_max);
+		ret = regulator_set_voltage(elink->supply, elink->vdd_wanted,
+					    wiggle);
+	}
+
+	if (ret) {
+		for (i = 0; i < E_PS_NUM_STATES; i++) {
+			new_vdd = cinfo->perf_state[i].vdd_thresh;
+			wiggle = min(new_vdd + step, cinfo->vdd_max);
+			ret = regulator_set_voltage(elink->supply,
+					new_vdd, wiggle);
+			if (!ret)
+				break;
+		}
+	}
 	if (ret)
 		return ret;
 
+	/* Pessimistic sleep if regulator doesn't provide a ramp-up time, then
+	 * it didn't block in regulator_set_voltage(). */
+	if (new_vdd != old_vdd &&
+	    regulator_set_voltage_time(elink->supply, old_vdd, new_vdd) <= 0)
+		usleep_range(10000, 10100);
+
 	ret = regulator_enable(elink->supply);
-	if (ret)
-		return ret;
 
 	usleep_range(100, 200);
 
-	return 0;
+	return ret;
 }
 
 static void elink_regulator_disable(struct elink_device *elink)
@@ -1552,7 +1641,7 @@ static int _elink_attr_vdd_wanted_store(struct elink_device *elink, int vdd)
 
 	/* Zero or below resets to default vdd */
 	if (vdd <= 0) {
-		elink->vdd_wanted = cinfo->vdd_default;
+		elink->vdd_wanted = -1;
 		return 0;
 	}
 
@@ -1714,18 +1803,10 @@ err_platform:
 
 static int elink_register(struct elink_device *elink)
 {
-	int ret, boot_vdd;
+	int ret;
 	dev_t devt;
-	const struct epiphany_chip_info *cinfo =
-		&epiphany_chip_info[elink->chip_type];
 
-	elink->vdd_wanted = cinfo->vdd_default;
-	if (elink->supply) {
-		/* Don't override boot vdd if above default */
-		boot_vdd = regulator_get_voltage(elink->supply);
-		if (cinfo->vdd_default < boot_vdd && boot_vdd < cinfo->vdd_max)
-			elink->vdd_wanted = boot_vdd;
-	}
+	elink->vdd_wanted = -1;
 
 	ret = elink_clks_get(elink);
 	if (ret)
