@@ -86,6 +86,17 @@ union elink_rxcfg {
 	};
 } __packed;
 
+union elink_mailboxstat {
+	u32 reg;
+	struct {
+		unsigned not_empty:1;
+		unsigned full:1;
+		unsigned half_full:1;
+		unsigned:13;
+		u16 count;
+	};
+} __packed;
+
 /* Chip registers */
 enum e_chip_regs {
 	E_REG_LINKCFG		= 0xf0300,

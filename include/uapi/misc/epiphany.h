@@ -84,6 +84,12 @@ struct e_mesh_info {
 #endif
 } __attribute__((packed));
 
+struct e_mailbox_msg {
+	__u32		from;
+	__u32		data;
+} __attribute__((packed));
+
+
 #define E_IOCTL_MAGIC  'E'
 #define E_IO(nr)		_IO(E_IOCTL_MAGIC, nr)
 #define E_IOR(nr, type)		_IOR(E_IOCTL_MAGIC, nr, type)
@@ -99,7 +105,9 @@ struct e_mesh_info {
 #define E_IOCTL_ELINK_PROBE		E_IOR(0x01, struct e_elink_info)
 #define E_IOCTL_MESH_PROBE		E_IOR(0x02, struct e_mesh_info)
 #define E_IOCTL_GET_MAPPINGS		E_IOR(0x03, struct e_mappings_info)
+#define E_IOCTL_MAILBOX_READ		E_IOWR(0x04, struct e_mailbox_msg)
+#define E_IOCTL_MAILBOX_COUNT		E_IO(0x05)
 
-#define E_IOCTL_MAXNR			0x03
+#define E_IOCTL_MAXNR			0x05
 
 #endif /* _UAPI_MISC_EPIPHANY_H */
