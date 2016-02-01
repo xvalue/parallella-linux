@@ -28,6 +28,8 @@
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/cdev.h>
+#include <linux/interrupt.h>
+#include <linux/wait.h>
 
 #include "epiphany.h"
 
@@ -237,6 +239,8 @@ struct elink_device {
 
 	/* Mapped memory regions */
 	struct list_head mappings_list;
+
+	wait_queue_head_t mailbox_wait;
 
 	phandle phandle;
 };
@@ -737,6 +741,62 @@ static void elink_regulator_disable(struct elink_device *elink)
 		regulator_disable(elink->supply);
 }
 
+static void elink_mailbox_irq_enable(struct elink_device *elink)
+{
+	union elink_rxcfg cfg;
+
+	cfg.reg = reg_read(elink->regs, ELINK_RXCFG);
+	cfg.mailbox_irq_en = 1;
+	reg_write(cfg.reg, elink->regs, ELINK_RXCFG);
+}
+
+static void elink_mailbox_irq_disable(struct elink_device *elink)
+{
+	union elink_rxcfg cfg;
+
+	cfg.reg = reg_read(elink->regs, ELINK_RXCFG);
+	cfg.mailbox_irq_en = 0;
+	reg_write(cfg.reg, elink->regs, ELINK_RXCFG);
+}
+
+static bool elink_mailbox_empty_p(struct elink_device *elink)
+{
+	union elink_mailboxstat status;
+
+	status.reg = reg_read(elink->regs, ELINK_MAILBOXSTAT);
+
+	return !status.not_empty;
+}
+
+static unsigned elink_mailbox_count(struct elink_device *elink)
+{
+	union elink_mailboxstat status;
+
+	status.reg = reg_read(elink->regs, ELINK_MAILBOXSTAT);
+
+	return status.count;
+}
+
+
+static irqreturn_t elink_mailbox_irq_handler(int irq, void *dev_id)
+{
+	struct elink_device *elink;
+	bool empty;
+
+	elink = dev_id;
+
+	mutex_lock(&epiphany.driver_lock);
+	empty = elink_mailbox_empty_p(elink);
+	if (!empty)
+		elink_mailbox_irq_disable(elink);
+	mutex_unlock(&epiphany.driver_lock);
+
+	if (!empty)
+		wake_up(&elink->mailbox_wait);
+
+	return empty ? IRQ_NONE : IRQ_HANDLED;
+}
+
 static int epiphany_reset(void)
 {
 	struct elink_device *elink;
@@ -1050,6 +1110,62 @@ static long elink_char_ioctl_elink_probe(struct elink_device *elink,
 	return 0;
 }
 
+static long elink_char_ioctl_mailbox_read(struct file *file,
+					  void __user *dst)
+{
+	struct e_mailbox_msg msg;
+	struct elink_device *elink = file_to_elink(file);
+
+	if (mutex_lock_interruptible(&epiphany.driver_lock))
+		return -ERESTARTSYS;
+
+	while (elink_mailbox_empty_p(elink)) {
+		mutex_unlock(&epiphany.driver_lock);
+
+		if (file->f_flags & O_NONBLOCK)
+			return -EAGAIN;
+
+		if (mutex_lock_interruptible(&epiphany.driver_lock))
+			return -ERESTARTSYS;
+
+		elink_mailbox_irq_enable(elink);
+
+		mutex_unlock(&epiphany.driver_lock);
+
+		if (wait_event_interruptible(elink->mailbox_wait,
+					     !elink_mailbox_empty_p(elink)))
+			return -ERESTARTSYS;
+
+		if (mutex_lock_interruptible(&epiphany.driver_lock))
+			return -ERESTARTSYS;
+	}
+
+	msg.from = reg_read(elink->regs, ELINK_MAILBOXLO);
+	msg.data = reg_read(elink->regs, ELINK_MAILBOXHI);
+
+	mutex_unlock(&epiphany.driver_lock);
+
+	if (copy_to_user(dst, &msg, sizeof(msg)))
+		return -EACCES;
+
+	return 0;
+}
+
+static long elink_char_ioctl_mailbox_count(struct file *file)
+{
+	long count;
+	struct elink_device *elink = file_to_elink(file);
+
+	if (mutex_lock_interruptible(&epiphany.driver_lock))
+		return -ERESTARTSYS;
+
+	count = elink_mailbox_count(elink);
+
+	mutex_unlock(&epiphany.driver_lock);
+
+	return count;
+}
+
 static long elink_char_ioctl(struct file *file, unsigned int cmd,
 				unsigned long arg)
 {
@@ -1102,6 +1218,10 @@ static long elink_char_ioctl(struct file *file, unsigned int cmd,
 		return elink_char_ioctl_elink_probe(elink, arg);
 	case E_IOCTL_GET_MAPPINGS:
 		return elink_char_ioctl_elink_get_mappings(elink, arg);
+	case E_IOCTL_MAILBOX_READ:
+		return elink_char_ioctl_mailbox_read(file, (void __user *) arg);
+	case E_IOCTL_MAILBOX_COUNT:
+		return elink_char_ioctl_mailbox_count(file);
 
 	default:
 		return -ENOTTY;
@@ -1828,6 +1948,8 @@ static int elink_register(struct elink_device *elink)
 	cdev_init(&elink->cdev, &elink_char_driver_ops);
 	elink->cdev.owner = THIS_MODULE;
 
+	init_waitqueue_head(&elink->mailbox_wait);
+
 	ret = cdev_add(&elink->cdev, devt, 1);
 	if (ret) {
 		dev_err(&elink->dev,
@@ -2092,7 +2214,7 @@ static struct elink_device *elink_of_probe(struct platform_device *pdev)
 	struct property *prop;
 	struct resource res;
 	u16 coreid;
-	int ret;
+	int ret, irq;
 
 	elink = devm_kzalloc(&pdev->dev, sizeof(*elink), GFP_KERNEL);
 	if (!elink)
@@ -2169,6 +2291,21 @@ static struct elink_device *elink_of_probe(struct platform_device *pdev)
 		return ERR_PTR(ret);
 	}
 
+	/* Mailbox interrupt */
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0) {
+		dev_err(&pdev->dev, "Could not get mailbox IRQ from platform data\n");
+		return ERR_PTR(irq);
+	}
+
+	ret = devm_request_irq(&pdev->dev, irq, elink_mailbox_irq_handler, 0,
+			dev_name(&pdev->dev), elink);
+	if (ret) {
+		dev_err(&pdev->dev, "Could not request mailbox IRQ\n");
+		return ERR_PTR(ret);
+	}
+
+	/* Chip-id pinout */
 	prop = of_find_property(pdev->dev.of_node,
 				"adapteva,no-coreid-pinout", NULL);
 	if (prop) {
