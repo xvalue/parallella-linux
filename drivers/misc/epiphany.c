@@ -322,6 +322,12 @@ static inline void reg_write(u32 value, void __iomem *base, u32 offset)
 	/* usleep_range(2000, 2100); */
 }
 
+static inline void reg_write64(u64 value, void __iomem *base, u32 offset)
+{
+	reg_write((u32) (value & 0xffffffff), base, offset);
+	reg_write((u32) (value >> 32), base, offset + 4);
+}
+
 static inline u32 reg_read(void __iomem *base, u32 offset)
 {
 	return ioread32((u8 __iomem *)base + offset);
@@ -623,6 +629,31 @@ static int configure_adjacent_links(struct elink_device *elink)
 	}
 }
 
+static void elink_update_mmu_mappings(struct elink_device *elink)
+{
+	const u32 mmu_base = 0xe8000;
+	struct mem_region *mapping;
+	u32 mmu_entry;
+	u64 phys_addr;
+
+	list_for_each_entry(mapping, &elink->mappings_list, list) {
+		mmu_entry = mmu_base + ((mapping->emesh_start >> 20) << 3);
+		phys_addr = mapping->start;
+		for (; phys_addr - mapping->start < mapping->size;
+				phys_addr += (1 << 20), mmu_entry += 8) {
+			dev_dbg(&elink->dev, "%s: mapping 0x%03x -> 0x%03llx\n",
+				__func__, (mmu_entry - mmu_base) >> 3,
+				phys_addr >> 20);
+			reg_write64(phys_addr >> 20, elink->regs, mmu_entry);
+		}
+	}
+	/* Map in the elink regs so the chip-array can access the mailbox
+	 * registers. FIXME: Not always this simple (phys addr == epiphany
+	 * addr) */
+	reg_write64(elink->regs_start >> 20, elink->regs,
+			mmu_base + (elink->regs_start >> (20 - 3)));
+}
+
 /* Reset the Epiphany platform */
 static int elink_reset(struct elink_device *elink)
 {
@@ -657,11 +688,11 @@ static int elink_reset(struct elink_device *elink)
 	txcfg.enable = 1;
 	reg_write(txcfg.reg, elink->regs, ELINK_TXCFG);
 
-	/* TODO: From configuration */
-	rxcfg.remap_mode = 1;
-	rxcfg.remap_sel = 0xfe0;
-	rxcfg.remap_pattern = 0x3e0;
+	rxcfg.mmu_enable = 1;
+	rxcfg.remap_mode = 0; /* no remapping, only mmu */
 	reg_write(rxcfg.reg, elink->regs, ELINK_RXCFG);
+
+	elink_update_mmu_mappings(elink);
 
 	usleep_range(10, 100);
 
