@@ -247,6 +247,7 @@ struct elink_device {
 	struct list_head mappings_list;
 
 	wait_queue_head_t mailbox_wait;
+	atomic_t mailbox_maybe_not_empty;
 
 	phandle phandle;
 };
@@ -824,8 +825,10 @@ static irqreturn_t elink_mailbox_irq_handler(int irq, void *dev_id)
 
 	mutex_lock(&epiphany.driver_lock);
 	empty = elink_mailbox_empty_p(elink);
-	if (!empty)
+	if (!empty) {
 		elink_mailbox_irq_disable(elink);
+		atomic_set(&elink->mailbox_maybe_not_empty, 1);
+	}
 	mutex_unlock(&epiphany.driver_lock);
 
 	if (!empty)
@@ -1187,13 +1190,17 @@ static long elink_char_ioctl_elink_probe(struct elink_device *elink,
 static long elink_char_ioctl_mailbox_read(struct file *file,
 					  void __user *dst)
 {
+	int ret;
 	struct e_mailbox_msg msg;
 	struct elink_device *elink = file_to_elink(file);
 
 	if (mutex_lock_interruptible(&epiphany.driver_lock))
 		return -ERESTARTSYS;
 
-	while (elink_mailbox_empty_p(elink)) {
+	while (!atomic_read(&elink->mailbox_maybe_not_empty)
+			|| elink_mailbox_empty_p(elink)) {
+		atomic_set(&elink->mailbox_maybe_not_empty, 0);
+
 		mutex_unlock(&epiphany.driver_lock);
 
 		if (file->f_flags & O_NONBLOCK)
@@ -1206,8 +1213,11 @@ static long elink_char_ioctl_mailbox_read(struct file *file,
 
 		mutex_unlock(&epiphany.driver_lock);
 
-		if (wait_event_interruptible(elink->mailbox_wait,
-					     !elink_mailbox_empty_p(elink)))
+		ret = wait_event_interruptible_timeout(
+				elink->mailbox_wait,
+				atomic_read(&elink->mailbox_maybe_not_empty),
+				msecs_to_jiffies(100));
+		if (ret == -ERESTARTSYS)
 			return -ERESTARTSYS;
 
 		if (mutex_lock_interruptible(&epiphany.driver_lock))
@@ -2023,6 +2033,7 @@ static int elink_register(struct elink_device *elink)
 	elink->cdev.owner = THIS_MODULE;
 
 	init_waitqueue_head(&elink->mailbox_wait);
+	atomic_set(&elink->mailbox_maybe_not_empty, 1);
 
 	ret = cdev_add(&elink->cdev, devt, 1);
 	if (ret) {
