@@ -45,6 +45,11 @@
 #define ROW(coreid) ((coreid) / 64)
 #define COL(coreid) ((coreid) % 64)
 
+struct epiphany_vma_entry {
+	struct list_head list;
+	struct vm_area_struct *vma;
+	struct pid *pid;
+};
 
 static struct epiphany {
 	struct class		class;
@@ -53,6 +58,7 @@ static struct epiphany {
 	struct list_head	elink_list;
 	struct list_head	chip_array_list;
 	struct list_head	mesh_list;
+	struct list_head	vma_list;
 
 	dev_t			devt;
 
@@ -943,32 +949,60 @@ static int char_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static int epiphany_map_memory(struct vm_area_struct *vma, bool device_mem)
+static void epiphany_vm_open(struct vm_area_struct *vma)
 {
-	int err;
+	struct epiphany_vma_entry *vma_entry;
 
-	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+	vma_entry = kzalloc(sizeof(*vma_entry), GFP_KERNEL);
+	if (!vma_entry)
+		return;
 
-	if (device_mem) {
-		err = io_remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff,
-					 vma->vm_end - vma->vm_start,
-					 vma->vm_page_prot);
-	} else {
-		err = remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff,
-				      vma->vm_end - vma->vm_start,
-				      vma->vm_page_prot);
-	}
+	mutex_lock(&epiphany.driver_lock);
 
-	if (err) {
-		pr_err("Failed mapping memory to vma 0x%08lx, size 0x%08lx, page offset 0x%08lx\n",
-		       vma->vm_start, vma->vm_end - vma->vm_start,
-		       vma->vm_pgoff);
-	}
+	vma_entry->vma = vma;
+	vma_entry->pid = get_task_pid(current->group_leader, PIDTYPE_PID);
+	list_add(&vma_entry->list, &epiphany.vma_list);
 
-	return err;
+	mutex_unlock(&epiphany.driver_lock);
 }
 
-static const struct vm_operations_struct mmap_mem_ops = {
+static void epiphany_vm_close(struct vm_area_struct *vma)
+{
+	struct epiphany_vma_entry *vma_entry;
+	bool found;
+
+	mutex_lock(&epiphany.driver_lock);
+
+	found = false;
+	list_for_each_entry(vma_entry, &epiphany.vma_list, list) {
+		if (vma_entry->vma != vma)
+			continue;
+
+		list_del(&vma_entry->list);
+		kfree(vma_entry);
+		found = true;
+		break;
+	}
+	WARN_ON(!found);
+
+	mutex_unlock(&epiphany.driver_lock);
+}
+
+static int epiphany_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+{
+	mutex_lock(&epiphany.driver_lock);
+
+	vm_insert_pfn(vma, (unsigned long)vmf->virtual_address, vmf->pgoff);
+
+	mutex_unlock(&epiphany.driver_lock);
+
+	return VM_FAULT_NOPAGE;
+}
+
+static const struct vm_operations_struct epiphany_vm_ops = {
+	.open = epiphany_vm_open,
+	.close = epiphany_vm_close,
+	.fault = epiphany_vm_fault,
 #ifdef CONFIG_HAVE_IOREMAP_PROT
 	.access = generic_access_phys
 #endif
@@ -982,7 +1016,10 @@ static int _elink_char_mmap(struct elink_device *elink,
 	struct mem_region *mapping;
 	phys_addr_t core_phys = 0;
 
-	vma->vm_ops = &mmap_mem_ops;
+	vma->vm_ops = &epiphany_vm_ops;
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+	vma->vm_flags |= VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP;
+	vma->vm_private_data = elink;
 
 	off = vma->vm_pgoff << PAGE_SHIFT;
 	size = vma->vm_end - vma->vm_start;
@@ -998,14 +1035,18 @@ static int _elink_char_mmap(struct elink_device *elink,
 				vma->vm_pgoff -
 				(mapping->emesh_start >> PAGE_SHIFT) +
 				(mapping->start >> PAGE_SHIFT);
-			return epiphany_map_memory(vma, false);
+			epiphany_vm_open(vma);
+			return 0;
 		}
 	}
 
 	if (elink->regs_start <= off &&
 	    off + size <= elink->regs_start + elink->regs_size) {
-		if (epiphany.param_unsafe_access)
-			return epiphany_map_memory(vma, true);
+		if (epiphany.param_unsafe_access) {
+			vma->vm_flags |= VM_IO;
+			epiphany_vm_open(vma);
+			return 0;
+		}
 		else
 			return -EACCES;
 	}
@@ -1018,7 +1059,9 @@ static int _elink_char_mmap(struct elink_device *elink,
 	phys_off = core_phys | (off & COREID_MASK);
 	if (!ret && phys_off - elink->emesh_start + size <= elink->emesh_size) {
 		vma->vm_pgoff = phys_off >> PAGE_SHIFT;
-		return epiphany_map_memory(vma, true);
+		vma->vm_flags |= VM_IO;
+		epiphany_vm_open(vma);
+		return 0;
 	}
 
 	dev_dbg(&elink->dev,
@@ -2456,6 +2499,7 @@ static void __init init_epiphany(void)
 	INIT_LIST_HEAD(&epiphany.elink_list);
 	INIT_LIST_HEAD(&epiphany.chip_array_list);
 	INIT_LIST_HEAD(&epiphany.mesh_list);
+	INIT_LIST_HEAD(&epiphany.vma_list);
 
 	idr_init(&epiphany.minor_idr);
 	spin_lock_init(&epiphany.minor_idr_lock);
