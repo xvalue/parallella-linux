@@ -991,15 +991,86 @@ static void epiphany_vm_close(struct vm_area_struct *vma)
 	mutex_unlock(&epiphany.driver_lock);
 }
 
+/* Epiphany mesh pfn to phys pfn
+ * &epiphany.driver_lock must be held by caller
+ * TODO: ???: Replace elink with vm_area_struct or mesh_device */
+static int mesh_pfn_to_phys_pfn(struct elink_device *elink, unsigned long pfn,
+				unsigned long *phys_pfn)
+{
+	const u16 coreid = pfn >> (COREID_SHIFT - PAGE_SHIFT);
+	const phys_addr_t core_offs = PFN_PHYS(pfn) & COREID_MASK;
+	const phys_addr_t core_end = core_offs + PAGE_SIZE;
+	const phys_addr_t start = PFN_PHYS(pfn);
+	const phys_addr_t end = PFN_PHYS(pfn + 1);
+	const struct epiphany_chip_info *cinfo =
+		&epiphany_chip_info[elink->chip_type];
+	unsigned offs;
+	phys_addr_t core_phys_addr;
+	struct mem_region *mapping;
+
+	if (end < start) {
+		WARN(1, "overflow");
+		return -EOVERFLOW;
+	}
+
+	if (!coreid_to_phys(elink, coreid, &core_phys_addr)) {
+		/* sram */
+		if (core_end <= cinfo->core_mem) {
+			*phys_pfn = PFN_DOWN(core_phys_addr + core_offs);
+			return 0;
+		}
+
+		/* registers.
+		 * N.B: End is rounded up from 0xf0800 to page boundary */
+		if (0xf0000 <= core_offs && core_end <= 0xf1000) {
+			*phys_pfn = PFN_DOWN(core_phys_addr + core_offs);
+			return 0;
+		}
+
+		return -EINVAL;
+	}
+
+	list_for_each_entry(mapping, &elink->mappings_list, list) {
+		if (mapping->emesh_start <= start &&
+		    end <= mapping->emesh_start + mapping->size) {
+			offs = start - mapping->emesh_start;
+			*phys_pfn = PFN_DOWN(mapping->start + offs);
+			return 0;
+		}
+	}
+
+	if (elink->regs_start <= start &&
+	    end <= elink->regs_start + elink->regs_size) {
+		if (epiphany.param_unsafe_access) {
+			*phys_pfn = PFN_DOWN(start);
+			return 0;
+		} else
+			return -EACCES;
+	}
+
+	return -EINVAL;
+}
+
 static int epiphany_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
+	int ret;
+	unsigned long phys_pfn;
+	struct elink_device *elink = vma->vm_private_data;
+
 	mutex_lock(&epiphany.driver_lock);
 
-	vm_insert_pfn(vma, (unsigned long)vmf->virtual_address, vmf->pgoff);
+	if (mesh_pfn_to_phys_pfn(elink, vmf->pgoff, &phys_pfn)) {
+		ret = VM_FAULT_SIGBUS;
+		goto out;
+	}
 
+	vm_insert_pfn(vma, (unsigned long)vmf->virtual_address, phys_pfn);
+	ret = VM_FAULT_NOPAGE;
+
+out:
 	mutex_unlock(&epiphany.driver_lock);
 
-	return VM_FAULT_NOPAGE;
+	return ret;
 }
 
 static const struct vm_operations_struct epiphany_vm_ops = {
@@ -1033,11 +1104,6 @@ static int _elink_char_mmap(struct elink_device *elink,
 	list_for_each_entry(mapping, &elink->mappings_list, list) {
 		if (mapping->emesh_start <= off &&
 		    off + size <= mapping->emesh_start + mapping->size) {
-			/* Adjust offset from emesh to phys */
-			vma->vm_pgoff =
-				vma->vm_pgoff -
-				(mapping->emesh_start >> PAGE_SHIFT) +
-				(mapping->start >> PAGE_SHIFT);
 			epiphany_vm_open(vma);
 			return 0;
 		}
@@ -1061,7 +1127,6 @@ static int _elink_char_mmap(struct elink_device *elink,
 	ret = coreid_to_phys(elink, (u16) coreoff, &core_phys);
 	phys_off = core_phys | (off & COREID_MASK);
 	if (!ret && phys_off - elink->emesh_start + size <= elink->emesh_size) {
-		vma->vm_pgoff = phys_off >> PAGE_SHIFT;
 		vma->vm_flags |= VM_IO;
 		epiphany_vm_open(vma);
 		return 0;
