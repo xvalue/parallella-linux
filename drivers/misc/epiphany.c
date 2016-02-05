@@ -888,7 +888,7 @@ static int _epiphany_get(void)
 
 	epiphany.u_count++;
 
-	return ret;
+	return 0;
 }
 
 static int epiphany_get(void)
