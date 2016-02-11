@@ -46,9 +46,11 @@
 #define COL(coreid) ((coreid) % 64)
 
 struct epiphany_vma_entry {
-	struct list_head list;
-	struct vm_area_struct *vma;
-	struct pid *pid;
+	struct list_head	list;
+	struct rcu_head		rcu_head;
+	struct vm_area_struct	*vma;
+	struct pid		*pid;
+	atomic_t		refcnt;
 };
 
 static struct epiphany {
@@ -58,7 +60,11 @@ static struct epiphany {
 	struct list_head	elink_list;
 	struct list_head	chip_array_list;
 	struct list_head	mesh_list;
+
 	struct list_head	vma_list;
+	struct mutex		vma_list_lock; /* protects list for updates */
+	atomic_t		vm_freeze_in_progress;
+	wait_queue_head_t	vm_freeze_wait;
 
 	dev_t			devt;
 
@@ -368,6 +374,13 @@ static inline struct mesh_device *file_to_mesh(struct file *file)
 static inline struct elink_device *vma_to_elink(struct vm_area_struct *vma)
 {
 	return file_to_elink(vma->vm_file);
+}
+
+static inline struct epiphany_vma_entry *
+vma_to_epiphany_vma_entry(struct vm_area_struct *vma)
+{
+	return container_of(vma->vm_private_data, struct epiphany_vma_entry,
+			    vma);
 }
 
 static int coreid_to_phys(struct elink_device *elink, u16 coreid,
@@ -855,6 +868,95 @@ static irqreturn_t elink_mailbox_irq_handler(int irq, void *dev_id)
 	return empty ? IRQ_NONE : IRQ_HANDLED;
 }
 
+static int epiphany_vm_freeze(bool interruptible)
+{
+	struct epiphany_vma_entry *vma_entry;
+	int ret = 0, n = 0;
+	struct {
+		struct task_struct *task;
+		struct mm_struct *mm;
+		struct vm_area_struct *vma;
+	} *list = NULL, *tmp;
+
+	atomic_inc(&epiphany.vm_freeze_in_progress);
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(vma_entry, &epiphany.vma_list, list) {
+		struct task_struct *task;
+		struct mm_struct *mm;
+
+		if (!vma_entry) {
+			pr_err("vma_entry==NULL rcu bug?\n");
+			BUG();
+		}
+
+		task = get_pid_task(vma_entry->pid, PIDTYPE_PID);
+		if (!task)
+			continue;
+
+		mm = get_task_mm(task);
+		if (!mm) {
+			put_task_struct(task);
+			continue;
+		}
+
+		down_read(&mm->mmap_sem);
+
+		if (!atomic_read(&vma_entry->refcnt)) {
+			up_read(&mm->mmap_sem);
+			mmput(mm);
+			put_task_struct(task);
+			continue;
+		}
+
+		tmp = krealloc(list, (n + 1) * sizeof(*list), GFP_KERNEL);
+		if (!tmp) {
+			rcu_read_unlock();
+			ret = -ENOMEM;
+			goto oom;
+		}
+		list = tmp;
+		list[n].task = task;
+		list[n].mm = mm;
+		list[n].vma = vma_entry->vma;
+		n++;
+	}
+	rcu_read_unlock();
+
+	if (interruptible)
+		ret = mutex_lock_interruptible(&epiphany.driver_lock);
+	else
+		mutex_lock(&epiphany.driver_lock);
+
+oom:
+	while (n--) {
+		struct vm_area_struct *vma = list[n].vma;
+
+		if (!ret)
+			zap_vma_ptes(vma, vma->vm_start,
+				     vma->vm_end - vma->vm_start);
+
+		up_read(&list[n].mm->mmap_sem);
+		mmput(list[n].mm);
+		put_task_struct(list[n].task);
+	}
+
+	if (ret)
+		if (atomic_dec_and_test(&epiphany.vm_freeze_in_progress))
+			wake_up_all(&epiphany.vm_freeze_wait);
+
+	kfree(list);
+
+	return ret;
+}
+
+static void epiphany_vm_unfreeze(void)
+{
+	mutex_unlock(&epiphany.driver_lock);
+	if (atomic_dec_and_test(&epiphany.vm_freeze_in_progress))
+		wake_up_all(&epiphany.vm_freeze_wait);
+}
+
 static int epiphany_reset(void)
 {
 	struct elink_device *elink;
@@ -893,6 +995,7 @@ out:
 	return retval;
 }
 
+/* caller must hold epiphany.driver_lock */
 static int _epiphany_get(void)
 {
 	int ret;
@@ -993,41 +1096,58 @@ static int char_release(struct inode *inode, struct file *file)
 
 static void epiphany_vm_open(struct vm_area_struct *vma)
 {
+	int newrefcnt;
 	struct epiphany_vma_entry *vma_entry;
 
-	vma_entry = kzalloc(sizeof(*vma_entry), GFP_KERNEL);
-	if (!vma_entry)
-		return;
+	mutex_lock(&epiphany.vma_list_lock);
 
-	mutex_lock(&epiphany.driver_lock);
+	if (vma->vm_private_data) {
+		vma_entry = vma_to_epiphany_vma_entry(vma);
+		pr_debug("%s: vma=%pK already in list\n", __func__, vma);
+		newrefcnt = atomic_add_return(1, &vma_entry->refcnt);
+		WARN_ON(newrefcnt < 2);
+		mutex_unlock(&epiphany.vma_list_lock);
+		return;
+	}
+
+	vma_entry = kzalloc(sizeof(*vma_entry), GFP_KERNEL);
+	if (!vma_entry) {
+		mutex_unlock(&epiphany.vma_list_lock);
+		return;
+	}
 
 	vma_entry->vma = vma;
-	vma_entry->pid = get_task_pid(current->group_leader, PIDTYPE_PID);
-	list_add(&vma_entry->list, &epiphany.vma_list);
+	vma_entry->pid = get_task_pid(current, PIDTYPE_PID);
+	atomic_set(&vma_entry->refcnt, 1);
 
-	mutex_unlock(&epiphany.driver_lock);
+	vma->vm_private_data = &vma_entry->vma;
+
+	list_add_tail_rcu(&vma_entry->list, &epiphany.vma_list);
+
+	/* ???: Since use of the _expedited version is discouraged: is there a
+	 * way we can get rid of it without hurting performance for mmap()? */
+	synchronize_rcu_expedited();
+	mutex_unlock(&epiphany.vma_list_lock);
+}
+
+static void vma_entry_free(struct rcu_head *rcu_head)
+{
+	struct epiphany_vma_entry *e =
+		container_of(rcu_head, struct epiphany_vma_entry, rcu_head);
+	put_pid(e->pid);
+	kfree(e);
 }
 
 static void epiphany_vm_close(struct vm_area_struct *vma)
 {
-	struct epiphany_vma_entry *vma_entry;
-	bool found;
+	struct epiphany_vma_entry *vma_entry = vma_to_epiphany_vma_entry(vma);
 
-	mutex_lock(&epiphany.driver_lock);
-
-	found = false;
-	list_for_each_entry(vma_entry, &epiphany.vma_list, list) {
-		if (vma_entry->vma != vma)
-			continue;
-
-		list_del(&vma_entry->list);
-		kfree(vma_entry);
-		found = true;
-		break;
+	mutex_lock(&epiphany.vma_list_lock);
+	if (atomic_dec_and_test(&vma_entry->refcnt)) {
+		list_del_rcu(&vma_entry->list);
+		call_rcu(&vma_entry->rcu_head, vma_entry_free);
 	}
-	WARN_ON(!found);
-
-	mutex_unlock(&epiphany.driver_lock);
+	mutex_unlock(&epiphany.vma_list_lock);
 }
 
 /* Epiphany mesh pfn to phys pfn
@@ -1092,24 +1212,33 @@ static int mesh_pfn_to_phys_pfn(struct elink_device *elink, unsigned long pfn,
 
 static int epiphany_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
-	int ret;
 	unsigned long phys_pfn;
 	struct elink_device *elink = vma_to_elink(vma);
+
+	if (vmf->flags & FAULT_FLAG_ALLOW_RETRY &&
+	    atomic_read(&epiphany.vm_freeze_in_progress)) {
+		pr_debug_ratelimited("%s: VMA freeze detected. Stalling process %s (pid: %d)\n",
+				     __func__, current->comm,
+				     task_pid_nr(current));
+		if (!(vmf->flags & FAULT_FLAG_RETRY_NOWAIT)) {
+			up_read(&vma->vm_mm->mmap_sem);
+			wait_event(epiphany.vm_freeze_wait,
+				!atomic_read(&epiphany.vm_freeze_in_progress));
+		}
+		return VM_FAULT_RETRY;
+	}
 
 	mutex_lock(&epiphany.driver_lock);
 
 	if (mesh_pfn_to_phys_pfn(elink, vmf->pgoff, &phys_pfn)) {
-		ret = VM_FAULT_SIGBUS;
-		goto out;
+		mutex_unlock(&epiphany.driver_lock);
+		return VM_FAULT_SIGBUS;
 	}
 
 	vm_insert_pfn(vma, (unsigned long)vmf->virtual_address, phys_pfn);
-	ret = VM_FAULT_NOPAGE;
 
-out:
 	mutex_unlock(&epiphany.driver_lock);
-
-	return ret;
+	return VM_FAULT_NOPAGE;
 }
 
 static const struct vm_operations_struct epiphany_vm_ops = {
@@ -2613,7 +2742,11 @@ static void __init init_epiphany(void)
 	INIT_LIST_HEAD(&epiphany.elink_list);
 	INIT_LIST_HEAD(&epiphany.chip_array_list);
 	INIT_LIST_HEAD(&epiphany.mesh_list);
+
 	INIT_LIST_HEAD(&epiphany.vma_list);
+	mutex_init(&epiphany.vma_list_lock);
+	init_waitqueue_head(&epiphany.vm_freeze_wait);
+	atomic_set(&epiphany.vm_freeze_in_progress, 0);
 
 	idr_init(&epiphany.minor_idr);
 	spin_lock_init(&epiphany.minor_idr_lock);
