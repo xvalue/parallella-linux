@@ -365,6 +365,11 @@ static inline struct mesh_device *file_to_mesh(struct file *file)
 	return container_of(file->private_data, struct mesh_device, cdev);
 }
 
+static inline struct elink_device *vma_to_elink(struct vm_area_struct *vma)
+{
+	return file_to_elink(vma->vm_file);
+}
+
 static int coreid_to_phys(struct elink_device *elink, u16 coreid,
 			  phys_addr_t *out)
 {
@@ -958,6 +963,27 @@ static int char_open(struct inode *inode, struct file *file)
 	return epiphany_get_interruptible();
 }
 
+static int mesh_char_open(struct inode *inode, struct file *file)
+{
+	struct array_device *array;
+	struct elink_device *elink;
+	struct mesh_device *mesh;
+
+	mesh = container_of(inode->i_cdev, struct mesh_device, cdev);
+
+	array = mesh->arrays[0];
+	if (!array)
+		return -EINVAL;
+
+	elink = array->connections[array->parent_side].elink;
+	if (!elink)
+		return -EINVAL;
+
+	file->private_data = &elink->cdev;
+
+	return epiphany_get_interruptible();
+}
+
 static int char_release(struct inode *inode, struct file *file)
 {
 	epiphany_put();
@@ -1068,7 +1094,7 @@ static int epiphany_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
 	int ret;
 	unsigned long phys_pfn;
-	struct elink_device *elink = vma->vm_private_data;
+	struct elink_device *elink = vma_to_elink(vma);
 
 	mutex_lock(&epiphany.driver_lock);
 
@@ -1106,7 +1132,6 @@ static int _elink_char_mmap(struct elink_device *elink,
 	vma->vm_ops = &epiphany_vm_ops;
 	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 	vma->vm_flags |= VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP;
-	vma->vm_private_data = elink;
 
 	off = vma->vm_pgoff << PAGE_SHIFT;
 	size = vma->vm_end - vma->vm_start;
@@ -1559,10 +1584,10 @@ static const struct file_operations elink_char_driver_ops = {
 
 static const struct file_operations mesh_char_driver_ops = {
 	.owner		= THIS_MODULE,
-	.open		= char_open,
+	.open		= mesh_char_open,
 	.release	= char_release,
-	.mmap		= mesh_char_mmap,
-	.unlocked_ioctl	= mesh_char_ioctl
+	.mmap		= elink_char_mmap,
+	.unlocked_ioctl	= elink_char_ioctl
 };
 
 static void mesh_device_release(struct device *dev)
