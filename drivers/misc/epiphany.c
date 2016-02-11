@@ -678,14 +678,14 @@ static int elink_reset(struct elink_device *elink)
 	reset.rx_reset = 1;
 	reg_write(reset.reg, elink->regs, ELINK_RESET);
 
-	usleep_range(10, 100);
+	usleep_range(2000, 2100);
 
 	/* de-assert reset */
 	reset.tx_reset = 0;
 	reset.rx_reset = 0;
 	reg_write(reset.reg, elink->regs, ELINK_RESET);
 
-	usleep_range(10, 100);
+	usleep_range(2000, 2100);
 
 	reg_write(elink->coreid_pinout, elink->regs, ELINK_CHIPID);
 
@@ -701,9 +701,11 @@ static int elink_reset(struct elink_device *elink)
 
 	elink_update_mmu_mappings(elink);
 
-	usleep_range(10, 100);
+	usleep_range(10000, 10100);
 
 	ret = configure_adjacent_links(elink);
+
+	usleep_range(10000, 10100);
 
 	return ret;
 }
@@ -718,12 +720,13 @@ static void elink_disable(struct elink_device *elink)
 
 	reg_write(reset.reg, elink->regs, ELINK_RESET);
 
-	usleep_range(10, 100);
+	usleep_range(2000, 2100);
 }
 
 static int elink_regulator_enable(struct elink_device *elink)
 {
 	int ret, i, old_vdd, new_vdd, step, wiggle;
+	bool extra_delay;
 	const struct epiphany_chip_info *cinfo =
 		&epiphany_chip_info[elink->chip_type];
 
@@ -761,14 +764,22 @@ static int elink_regulator_enable(struct elink_device *elink)
 		return ret;
 
 	/* Pessimistic sleep if regulator doesn't provide a ramp-up time, then
-	 * it didn't block in regulator_set_voltage(). */
-	if (new_vdd != old_vdd &&
-	    regulator_set_voltage_time(elink->supply, old_vdd, new_vdd) <= 0)
-		usleep_range(10000, 10100);
+	 * it didn't block in regulator_set_voltage(). ???: And will also
+	 * not block in regulator_enable() ??? */
+
+	extra_delay =
+		(0 >= regulator_set_voltage_time(elink->supply,
+						 cinfo->vdd_min,
+						 cinfo->vdd_max))
+		? true : false;
+
+	if (extra_delay && old_vdd != new_vdd)
+		usleep_range(20000, 20100);
 
 	ret = regulator_enable(elink->supply);
 
-	usleep_range(100, 200);
+	if (extra_delay)
+		usleep_range(20000, 20100);
 
 	return ret;
 }
@@ -777,6 +788,8 @@ static void elink_regulator_disable(struct elink_device *elink)
 {
 	if (elink->supply)
 		regulator_disable(elink->supply);
+
+	usleep_range(2000, 2100);
 }
 
 static void elink_mailbox_irq_enable(struct elink_device *elink)
