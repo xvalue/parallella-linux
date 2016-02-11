@@ -1361,6 +1361,20 @@ static long elink_char_ioctl_elink_get_mappings(struct elink_device *elink,
 	return 0;
 }
 
+static long elink_char_ioctl_elink_reset(struct elink_device *elink)
+{
+	int ret;
+
+	if (epiphany_vm_freeze(true))
+		return -ERESTARTSYS;
+
+	ret = epiphany_reset();
+
+	epiphany_vm_unfreeze();
+
+	return ret;
+}
+
 static long elink_char_ioctl_elink_probe(struct elink_device *elink,
 					 unsigned long arg)
 {
@@ -1513,23 +1527,7 @@ static long elink_char_ioctl(struct file *file, unsigned int cmd,
 
 	switch (cmd) {
 	case E_IOCTL_RESET:
-		/* This is unsafe since another thread might be accessing the
-		 * emesh concurrently. Either we need to suspend all tasks that
-		 * have the device open or perhaps we can do it with a fault
-		 * handler ? */
-		if (mutex_lock_interruptible(&epiphany.driver_lock))
-			return -ERESTARTSYS;
-		/* Reset all devices, might be a better idea to register a
-		 * "ectrl" control device for the class to make things more
-		 * explicit
-		 */
-		err = epiphany_reset();
-		mutex_unlock(&epiphany.driver_lock);
-
-		if (err)
-			return err;
-
-		break;
+		return elink_char_ioctl_elink_reset(elink);
 	case E_IOCTL_ELINK_PROBE:
 		return elink_char_ioctl_elink_probe(elink, arg);
 	case E_IOCTL_GET_MAPPINGS:
@@ -1543,7 +1541,7 @@ static long elink_char_ioctl(struct file *file, unsigned int cmd,
 		return -ENOTTY;
 	}
 
-	return 0;
+	return -ENOTTY;
 }
 
 /* TODO: Currently we only support meshes with one chip-array ... */
@@ -1652,24 +1650,7 @@ static long mesh_char_ioctl(struct file *file, unsigned int cmd,
 
 	switch (cmd) {
 	case E_IOCTL_RESET:
-		/* This is unsafe since another thread might be accessing the
-		 * emesh concurrently. Either we need to suspend all tasks that
-		 * have the device open or perhaps we can do it with a fault
-		 * handler ? */
-		if (mutex_lock_interruptible(&epiphany.driver_lock))
-			return -ERESTARTSYS;
-		/* Reset all devices, might be a better idea to register a
-		 * "ectrl" control device for the class to make things more
-		 * explicit
-		 */
-		err = epiphany_reset();
-		mutex_unlock(&epiphany.driver_lock);
-
-		if (err)
-			return err;
-
-		break;
-
+		return elink_char_ioctl_elink_reset(elink);
 	case E_IOCTL_MESH_PROBE:
 		return mesh_char_ioctl_probe(mesh, arg);
 
@@ -1680,7 +1661,7 @@ static long mesh_char_ioctl(struct file *file, unsigned int cmd,
 		return -ENOTTY;
 	}
 
-	return 0;
+	return -ENOTTY;
 }
 
 static int minor_get(void *ptr)
