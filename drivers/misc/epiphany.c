@@ -269,6 +269,7 @@ struct elink_device {
 	struct list_head mappings_list;
 
 	wait_queue_head_t mailbox_wait;
+	struct work_struct mailbox_irq_work;
 	atomic_t mailbox_maybe_not_empty;
 
 	phandle phandle;
@@ -862,13 +863,11 @@ static unsigned elink_mailbox_count(struct elink_device *elink)
 	return status.count;
 }
 
-
-static irqreturn_t elink_mailbox_irq_handler(int irq, void *dev_id)
+static void elink_mailbox_irq_handler_bh(struct work_struct *ws)
 {
-	struct elink_device *elink;
 	bool empty;
-
-	elink = dev_id;
+	struct elink_device *elink =
+		container_of(ws, struct elink_device, mailbox_irq_work);
 
 	mutex_lock(&epiphany.driver_lock);
 	empty = elink_mailbox_empty_p(elink);
@@ -880,8 +879,16 @@ static irqreturn_t elink_mailbox_irq_handler(int irq, void *dev_id)
 
 	if (!empty)
 		wake_up(&elink->mailbox_wait);
+}
 
-	return empty ? IRQ_NONE : IRQ_HANDLED;
+static irqreturn_t elink_mailbox_irq_handler(int irq, void *dev_id)
+{
+	struct elink_device *elink = dev_id;
+
+	schedule_work(&elink->mailbox_irq_work);
+
+	/* We don't know if we caused interrupt */
+	return IRQ_HANDLED;
 }
 
 static int epiphany_vm_freeze(bool interruptible)
@@ -2268,6 +2275,7 @@ static int elink_register(struct elink_device *elink)
 
 	init_waitqueue_head(&elink->mailbox_wait);
 	atomic_set(&elink->mailbox_maybe_not_empty, 1);
+	INIT_WORK(&elink->mailbox_irq_work, elink_mailbox_irq_handler_bh);
 
 	ret = cdev_add(&elink->cdev, devt, 1);
 	if (ret) {
