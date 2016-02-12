@@ -34,7 +34,7 @@ enum e_connection_type {
 };
 
 enum e_chip_type {
-	E_CHIP_INVAL = 0,
+	E_CHIP_UNKNOWN = 0,
 	E_CHIP_E16G301,
 	E_CHIP_E64G401,
 	E_CHIP_MAX

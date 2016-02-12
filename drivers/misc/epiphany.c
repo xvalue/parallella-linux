@@ -121,6 +121,22 @@ struct epiphany_chip_info {
 	struct performance_state_cfg perf_state[E_PS_NUM_STATES];
 };
 static const struct epiphany_chip_info epiphany_chip_info[E_CHIP_MAX] = {
+	/* Safe values when chip is unknown. */
+	[E_CHIP_UNKNOWN] = {
+		.vdd_min	=  900000,
+		.vdd_max	= 1025000,
+
+		.perf_state = {
+			[E_PS_HIGHEST] = {
+				.vdd_thresh = 1000000,
+				.linkcfg_tx_divider = 1
+			},
+			[E_PS_LOWEST] = {
+				.vdd_thresh = 1000000,
+				.linkcfg_tx_divider = 1
+			}
+		}
+	},
 	[E_CHIP_E16G301] = {
 		.rows = 4,
 		.cols = 4,
@@ -186,7 +202,7 @@ enum elink_generation {
 };
 
 enum elink_platform {
-	E_PLATF_INVAL = 0,
+	E_PLATF_UNKNOWN = 0,
 	E_PLATF_E16_7Z020_GPIO,
 	E_PLATF_E16_7Z020_NO_GPIO,
 	E_PLATF_E16_7Z010_GPIO,
@@ -196,7 +212,7 @@ enum elink_platform {
 };
 
 static const enum e_chip_type elink_platform_chip_match[E_PLATF_MAX] = {
-	[E_PLATF_INVAL]			= E_CHIP_INVAL,
+	[E_PLATF_UNKNOWN]		= E_CHIP_UNKNOWN,
 	[E_PLATF_E16_7Z020_GPIO]	= E_CHIP_E16G301,
 	[E_PLATF_E16_7Z020_NO_GPIO]	= E_CHIP_E16G301,
 	[E_PLATF_E16_7Z010_GPIO]	= E_CHIP_E16G301,
@@ -792,7 +808,7 @@ static int elink_regulator_enable(struct elink_device *elink)
 		? true : false;
 
 	if (extra_delay && old_vdd != new_vdd)
-		usleep_range(20000, 20100);
+		msleep(100);
 
 	ret = regulator_enable(elink->supply);
 
@@ -2186,8 +2202,12 @@ static int elink_probe(struct elink_device *elink)
 	 * clock from the chip it's connected to) */
 
 	epiphany_get();
-	if (elink_regulator_enable(elink))
-		return -EIO;
+
+	elink->chip_type = E_CHIP_UNKNOWN;
+	if (elink_regulator_enable(elink)) {
+		ret = -EIO;
+		goto err_regulator;
+	}
 
 	elink_reset(elink);
 
@@ -2220,6 +2240,7 @@ static int elink_probe(struct elink_device *elink)
 
 err_platform:
 	elink_regulator_disable(elink);
+err_regulator:
 	epiphany_put();
 
 	return ret;
