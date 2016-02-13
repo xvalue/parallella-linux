@@ -1237,6 +1237,7 @@ static int epiphany_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
 	unsigned long phys_pfn;
 	struct elink_device *elink = vma_to_elink(vma);
+	int ret;
 
 	if (vmf->flags & FAULT_FLAG_ALLOW_RETRY &&
 	    atomic_read(&epiphany.vm_freeze_in_progress)) {
@@ -1245,23 +1246,33 @@ static int epiphany_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 				     task_pid_nr(current));
 		if (!(vmf->flags & FAULT_FLAG_RETRY_NOWAIT)) {
 			up_read(&vma->vm_mm->mmap_sem);
-			wait_event(epiphany.vm_freeze_wait,
+			wait_event_interruptible(epiphany.vm_freeze_wait,
 				!atomic_read(&epiphany.vm_freeze_in_progress));
 		}
 		return VM_FAULT_RETRY;
 	}
 
-	mutex_lock(&epiphany.driver_lock);
+	ret = mutex_lock_interruptible(&epiphany.driver_lock);
+	if (ret)
+		goto out;
 
-	if (mesh_pfn_to_phys_pfn(elink, vmf->pgoff, &phys_pfn)) {
-		mutex_unlock(&epiphany.driver_lock);
+	ret = mesh_pfn_to_phys_pfn(elink, vmf->pgoff, &phys_pfn);
+	if (ret)
+		goto out_unlock;
+
+	ret = vm_insert_pfn(vma, (unsigned long)vmf->virtual_address, phys_pfn);
+
+out_unlock:
+	mutex_unlock(&epiphany.driver_lock);
+out:
+	switch (ret) {
+	case 0:
+	case -ERESTARTSYS:
+	case -EINTR:
+		return VM_FAULT_NOPAGE;
+	default:
 		return VM_FAULT_SIGBUS;
 	}
-
-	vm_insert_pfn(vma, (unsigned long)vmf->virtual_address, phys_pfn);
-
-	mutex_unlock(&epiphany.driver_lock);
-	return VM_FAULT_NOPAGE;
 }
 
 static const struct vm_operations_struct epiphany_vm_ops = {
