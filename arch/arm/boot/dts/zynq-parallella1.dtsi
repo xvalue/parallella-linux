@@ -182,7 +182,6 @@
 		regulators {
 			regulator_epiphany: dcd1 {
 				regulator-name = "VDD_DSP";
-				regulator-always-on;
 				regulator-min-microvolt =  <900000>;
 				regulator-max-microvolt = <1200000>;
 			};
