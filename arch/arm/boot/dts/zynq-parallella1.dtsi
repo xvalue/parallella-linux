@@ -83,7 +83,7 @@
 &elink0 {
 	compatible = "adapteva,elink";
 
-	interrupts = <0 55 4>;
+	interrupts = <0 55 1>;
 	interrupt-parent = <&intc>;
 
 	clocks = <&clkc 15>, <&clkc 16>, <&clkc 17>, <&clkc 18>;
