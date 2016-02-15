@@ -344,12 +344,6 @@ array_get_max_perf_state(const struct array_device *array)
 static inline void reg_write(u32 value, void __iomem *base, u32 offset)
 {
 	iowrite32(value, (u8 __iomem *)base + offset);
-
-	/* TODO: With the new OH elink this does not seem to be needed anymore.
-	 * Remove comment when the code has been tested on more boards.
-	 * Sledge-hammer approach. Needed on some Kickstarter boards. Ultimately
-	 * these long sleeps should only be needed when modifying clocks. */
-	/* usleep_range(2000, 2100); */
 }
 
 static inline void reg_write64(u64 value, void __iomem *base, u32 offset)
@@ -712,14 +706,14 @@ static int elink_reset(struct elink_device *elink)
 	reset.rx_reset = 1;
 	reg_write(reset.reg, elink->regs, ELINK_RESET);
 
-	usleep_range(2000, 2100);
+	usleep_range(500, 600);
 
 	/* de-assert reset */
 	reset.tx_reset = 0;
 	reset.rx_reset = 0;
 	reg_write(reset.reg, elink->regs, ELINK_RESET);
 
-	usleep_range(2000, 2100);
+	usleep_range(500, 600);
 
 	reg_write(elink->coreid_pinout, elink->regs, ELINK_CHIPID);
 
@@ -735,11 +729,7 @@ static int elink_reset(struct elink_device *elink)
 
 	elink_update_mmu_mappings(elink);
 
-	usleep_range(10000, 10100);
-
 	ret = configure_adjacent_links(elink);
-
-	usleep_range(10000, 10100);
 
 	return ret;
 }
@@ -754,7 +744,7 @@ static void elink_disable(struct elink_device *elink)
 
 	reg_write(reset.reg, elink->regs, ELINK_RESET);
 
-	usleep_range(2000, 2100);
+	usleep_range(500, 600);
 }
 
 static int elink_regulator_enable(struct elink_device *elink)
