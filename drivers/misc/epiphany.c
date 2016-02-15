@@ -396,8 +396,7 @@ static inline struct elink_device *vma_to_elink(struct vm_area_struct *vma)
 static inline struct epiphany_vma_entry *
 vma_to_epiphany_vma_entry(struct vm_area_struct *vma)
 {
-	return container_of(vma->vm_private_data, struct epiphany_vma_entry,
-			    vma);
+	return (struct epiphany_vma_entry *) vma->vm_private_data;
 }
 
 static int coreid_to_phys(struct elink_device *elink, u16 coreid,
@@ -1120,12 +1119,11 @@ static int char_release(struct inode *inode, struct file *file)
 static void epiphany_vm_open(struct vm_area_struct *vma)
 {
 	int newrefcnt;
-	struct epiphany_vma_entry *vma_entry;
+	struct epiphany_vma_entry *vma_entry = vma_to_epiphany_vma_entry(vma);
 
 	mutex_lock(&epiphany.vma_list_lock);
 
-	if (vma->vm_private_data) {
-		vma_entry = vma_to_epiphany_vma_entry(vma);
+	if (vma_entry) {
 		pr_debug("%s: vma=%pK already in list\n", __func__, vma);
 		newrefcnt = atomic_add_return(1, &vma_entry->refcnt);
 		WARN_ON(newrefcnt < 2);
@@ -1143,7 +1141,7 @@ static void epiphany_vm_open(struct vm_area_struct *vma)
 	vma_entry->pid = get_task_pid(current, PIDTYPE_PID);
 	atomic_set(&vma_entry->refcnt, 1);
 
-	vma->vm_private_data = &vma_entry->vma;
+	vma->vm_private_data = vma_entry;
 
 	list_add_tail_rcu(&vma_entry->list, &epiphany.vma_list);
 
