@@ -8,6 +8,8 @@ Required properties:
   See ../clocks/clock-bindings.txt for details.
 - clock-names: Tuple to identify input clocks, must contain "uart_clk" and "pclk"
   See ../clocks/clock-bindings.txt for details.
+- cdns,rx-no-pullup: For boards that are missing a pull-up resistor on the
+  RX pin.
 
 
 Example:
