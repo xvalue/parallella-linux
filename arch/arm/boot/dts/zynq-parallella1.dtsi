@@ -388,6 +388,22 @@
 		#address-cells = <1>;
 		#size-cells = <1>;
 		m25p,fast-read;
+		partition@0x00000000 {
+			label = "boot";
+			reg = <0x00000000 0x004e0000>;
+		};
+		partition@0x004e0000 {
+			label = "bootenv";
+			reg = <0x004e0000 0x00020000>;
+		};
+		partition@0x00ff0000 {
+			label = "version";
+			reg = <0x00ff0000 0x00010000>;
+			/* Offset	Name	Description
+			 * 0x0:		Version	32-bit LSB running number @0x0
+			 * 0x4		Magic	"0x13371338"
+			 */
+		};
 	};
 };
 
