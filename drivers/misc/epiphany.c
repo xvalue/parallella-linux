@@ -924,10 +924,7 @@ static int epiphany_vm_freeze(bool interruptible)
 			continue;
 		}
 
-		down_read(&mm->mmap_sem);
-
 		if (!atomic_read(&vma_entry->refcnt)) {
-			up_read(&mm->mmap_sem);
 			mmput(mm);
 			put_task_struct(task);
 			continue;
@@ -935,6 +932,9 @@ static int epiphany_vm_freeze(bool interruptible)
 
 		tmp = krealloc(list, (n + 1) * sizeof(*list), GFP_KERNEL);
 		if (!tmp) {
+			mmput(mm);
+			put_task_struct(task);
+
 			rcu_read_unlock();
 			ret = -ENOMEM;
 			goto oom;
@@ -956,10 +956,14 @@ oom:
 	while (n--) {
 		struct vm_area_struct *vma = list[n].vma;
 
-		if (!ret)
+		down_read(&list[n].mm->mmap_sem);
+		if (ret != -ERESTARTSYS && ret != -EINTR) {
+			/* Here's a race with epiphany_vm_close(). If the vma
+			 * has already been closed we should not zap its ptes
+			 */
 			zap_vma_ptes(vma, vma->vm_start,
 				     vma->vm_end - vma->vm_start);
-
+		}
 		up_read(&list[n].mm->mmap_sem);
 		mmput(list[n].mm);
 		put_task_struct(list[n].task);
@@ -1252,7 +1256,12 @@ static int epiphany_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 		return VM_FAULT_RETRY;
 	}
 
+	/* Release mmap_sem to work around lock inversion with
+	 * epiphany_vm_freeze().
+	 */
+	up_read(&vma->vm_mm->mmap_sem);
 	ret = mutex_lock_interruptible(&epiphany.driver_lock);
+	down_read(&vma->vm_mm->mmap_sem);
 	if (ret)
 		goto out;
 
