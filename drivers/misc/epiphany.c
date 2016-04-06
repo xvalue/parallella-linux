@@ -80,6 +80,9 @@ static struct epiphany {
 	/* One big lock for everything */
 	struct mutex		driver_lock;
 
+	/* For thermal daemon (protected by driver lock) */
+	bool			thermal_disallow;
+
 	/* Module parameters */
 	bool			param_unsafe_access; /* access to fpga regs */
 } epiphany = {};
@@ -1265,6 +1268,14 @@ static int epiphany_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	if (ret)
 		goto out;
 
+	if (epiphany.thermal_disallow) {
+		pr_info_ratelimited("%s: Temperature outside operating range. Sending SIGBUS to process %s (pid: %d)\n",
+				     __func__, current->comm,
+				     task_pid_nr(current));
+		ret = -EACCES;
+		goto out_unlock;
+	}
+
 	ret = mesh_pfn_to_phys_pfn(elink, vmf->pgoff, &phys_pfn);
 	if (ret)
 		goto out_unlock;
@@ -1411,10 +1422,15 @@ static long elink_char_ioctl_elink_reset(struct elink_device *elink)
 	if (epiphany_vm_freeze(true))
 		return -ERESTARTSYS;
 
+	if (epiphany.thermal_disallow) {
+		ret = -EACCES;
+		goto out;
+	}
+
 	ret = epiphany_reset();
 
+out:
 	epiphany_vm_unfreeze();
-
 	return ret;
 }
 
@@ -1486,6 +1502,11 @@ static long elink_char_ioctl_mailbox_read(struct file *file,
 	if (mutex_lock_interruptible(&epiphany.driver_lock))
 		return -ERESTARTSYS;
 
+	if (epiphany.thermal_disallow) {
+		mutex_unlock(&epiphany.driver_lock);
+		return -EACCES;
+	}
+
 	while (!atomic_read(&elink->mailbox_maybe_not_empty)
 			|| elink_mailbox_empty_p(elink)) {
 		atomic_set(&elink->mailbox_maybe_not_empty, 0);
@@ -1511,6 +1532,11 @@ static long elink_char_ioctl_mailbox_read(struct file *file,
 
 		if (mutex_lock_interruptible(&epiphany.driver_lock))
 			return -ERESTARTSYS;
+
+		if (epiphany.thermal_disallow) {
+			mutex_unlock(&epiphany.driver_lock);
+			return -EACCES;
+		}
 	}
 
 	msg.from = reg_read(elink->regs, ELINK_MAILBOXLO);
@@ -1532,11 +1558,69 @@ static long elink_char_ioctl_mailbox_count(struct file *file)
 	if (mutex_lock_interruptible(&epiphany.driver_lock))
 		return -ERESTARTSYS;
 
+	if (epiphany.thermal_disallow) {
+		mutex_unlock(&epiphany.driver_lock);
+		return -EACCES;
+	}
+
 	count = elink_mailbox_count(elink);
 
 	mutex_unlock(&epiphany.driver_lock);
 
 	return count;
+}
+
+static long elink_char_ioctl_thermal_disallow(struct file *file)
+{
+	struct elink_device *elink;
+	int ret = 0;
+
+	if (epiphany_vm_freeze(true))
+		return -ERESTARTSYS;
+
+	if (epiphany.thermal_disallow)
+		goto out;
+
+	epiphany.thermal_disallow = true;
+
+	/* Up refcount so it doesn't drop to 0 */
+	epiphany.u_count++;
+
+	list_for_each_entry(elink, &epiphany.elink_list, list)
+		elink_disable(elink);
+
+	list_for_each_entry(elink, &epiphany.elink_list, list)
+		elink_regulator_disable(elink);
+
+out:
+	epiphany_vm_unfreeze();
+	return ret;
+}
+
+static long elink_char_ioctl_thermal_allow(struct file *file)
+{
+	struct elink_device *elink;
+	long ret = 0;
+
+	if (epiphany_vm_freeze(true))
+		return -ERESTARTSYS;
+
+	if (!epiphany.thermal_disallow)
+		goto out;
+
+	epiphany.thermal_disallow = false;
+
+	/* Restore refcount */
+	epiphany.u_count--;
+
+	list_for_each_entry(elink, &epiphany.elink_list, list)
+		elink_regulator_enable(elink);
+
+	ret = epiphany_reset();
+
+out:
+	epiphany_vm_unfreeze();
+	return ret;
 }
 
 static long elink_char_ioctl(struct file *file, unsigned int cmd,
@@ -1579,6 +1663,10 @@ static long elink_char_ioctl(struct file *file, unsigned int cmd,
 		return elink_char_ioctl_mailbox_read(file, (void __user *) arg);
 	case E_IOCTL_MAILBOX_COUNT:
 		return elink_char_ioctl_mailbox_count(file);
+	case E_IOCTL_THERMAL_DISALLOW:
+		return elink_char_ioctl_thermal_disallow(file);
+	case E_IOCTL_THERMAL_ALLOW:
+		return elink_char_ioctl_thermal_allow(file);
 
 	default:
 		return -ENOTTY;
@@ -2778,6 +2866,8 @@ static void __init init_epiphany(void)
 	init_waitqueue_head(&epiphany.vm_freeze_wait);
 	atomic_set(&epiphany.vm_freeze_in_progress, 0);
 
+	epiphany.thermal_disallow = false;
+
 	idr_init(&epiphany.minor_idr);
 	spin_lock_init(&epiphany.minor_idr_lock);
 
@@ -2837,6 +2927,12 @@ module_init(epiphany_module_init);
 static void __exit epiphany_module_exit(void)
 {
 	struct mesh_device *curr, *next;
+
+	if (epiphany.thermal_disallow) {
+		epiphany.thermal_disallow = false;
+		/* Fix refcount, elinks + regulators already disabled */
+		epiphany.u_count--;
+	}
 
 	list_for_each_entry_safe(curr, next, &epiphany.mesh_list, list)
 		mesh_unregister(curr);

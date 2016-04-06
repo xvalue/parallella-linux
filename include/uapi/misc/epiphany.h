@@ -107,7 +107,9 @@ struct e_mailbox_msg {
 #define E_IOCTL_GET_MAPPINGS		E_IOR(0x03, struct e_mappings_info)
 #define E_IOCTL_MAILBOX_READ		E_IOWR(0x04, struct e_mailbox_msg)
 #define E_IOCTL_MAILBOX_COUNT		E_IO(0x05)
+#define E_IOCTL_THERMAL_DISALLOW	E_IO(0x06)
+#define E_IOCTL_THERMAL_ALLOW		E_IO(0x07)
 
-#define E_IOCTL_MAXNR			0x05
+#define E_IOCTL_MAXNR			0x07
 
 #endif /* _UAPI_MISC_EPIPHANY_H */
