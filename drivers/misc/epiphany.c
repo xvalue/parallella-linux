@@ -897,15 +897,19 @@ static irqreturn_t elink_mailbox_irq_handler(int irq, void *dev_id)
 
 static int epiphany_vm_freeze(bool interruptible)
 {
+	int ret = 0;
 	struct epiphany_vma_entry *vma_entry;
-	int ret = 0, n = 0;
-	struct {
-		struct task_struct *task;
-		struct mm_struct *mm;
-		struct vm_area_struct *vma;
-	} *list = NULL, *tmp;
 
 	atomic_inc(&epiphany.vm_freeze_in_progress);
+
+	if (interruptible) {
+		if (mutex_lock_interruptible(&epiphany.driver_lock)) {
+			ret = -ERESTARTSYS;
+			goto out;
+		}
+	} else {
+		mutex_lock(&epiphany.driver_lock);
+	}
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(vma_entry, &epiphany.vma_list, list) {
@@ -927,56 +931,23 @@ static int epiphany_vm_freeze(bool interruptible)
 			continue;
 		}
 
-		if (!atomic_read(&vma_entry->refcnt)) {
-			mmput(mm);
-			put_task_struct(task);
-			continue;
-		}
-
-		tmp = krealloc(list, (n + 1) * sizeof(*list), GFP_KERNEL);
-		if (!tmp) {
-			mmput(mm);
-			put_task_struct(task);
-
-			rcu_read_unlock();
-			ret = -ENOMEM;
-			goto oom;
-		}
-		list = tmp;
-		list[n].task = task;
-		list[n].mm = mm;
-		list[n].vma = vma_entry->vma;
-		n++;
-	}
-	rcu_read_unlock();
-
-	if (interruptible)
-		ret = mutex_lock_interruptible(&epiphany.driver_lock);
-	else
-		mutex_lock(&epiphany.driver_lock);
-
-oom:
-	while (n--) {
-		struct vm_area_struct *vma = list[n].vma;
-
-		down_read(&list[n].mm->mmap_sem);
-		if (ret != -ERESTARTSYS && ret != -EINTR) {
-			/* Here's a race with epiphany_vm_close(). If the vma
-			 * has already been closed we should not zap its ptes
-			 */
+		down_read(&mm->mmap_sem);
+		if (atomic_read(&vma_entry->refcnt)) {
+			struct vm_area_struct *vma = vma_entry->vma;
 			zap_vma_ptes(vma, vma->vm_start,
 				     vma->vm_end - vma->vm_start);
 		}
-		up_read(&list[n].mm->mmap_sem);
-		mmput(list[n].mm);
-		put_task_struct(list[n].task);
-	}
+		up_read(&mm->mmap_sem);
 
+		mmput(mm);
+		put_task_struct(task);
+	}
+	rcu_read_unlock();
+
+out:
 	if (ret)
 		if (atomic_dec_and_test(&epiphany.vm_freeze_in_progress))
 			wake_up_all(&epiphany.vm_freeze_wait);
-
-	kfree(list);
 
 	return ret;
 }
