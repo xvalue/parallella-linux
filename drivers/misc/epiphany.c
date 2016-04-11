@@ -726,23 +726,11 @@ static int elink_reset(struct elink_device *elink)
 	txcfg.enable = 1;
 	reg_write(txcfg.reg, elink->regs, ELINK_TXCFG);
 
-
-	/* HACK: Use static remapping until this is fixed:
-	 * "Consecutive writes to rxmmu table results in system freeze"
-	 * https://github.com/parallella/oh/issues/50
-	 */
-#if 0
 	rxcfg.mmu_enable = 1;
 	rxcfg.remap_mode = 0; /* no remapping, only mmu */
 	reg_write(rxcfg.reg, elink->regs, ELINK_RXCFG);
 
 	elink_update_mmu_mappings(elink);
-#else
-	rxcfg.remap_mode = 1;
-	rxcfg.remap_sel = 0xfe0;
-	rxcfg.remap_pattern = 0x3e0;
-	reg_write(rxcfg.reg, elink->regs, ELINK_RXCFG);
-#endif
 
 	ret = configure_adjacent_links(elink);
 
