@@ -364,6 +364,9 @@ CONFIG_FONT_8x16=y
 #epiphany driver
 CONFIG_EPIPHANY=y
 
+# VDD_DSP regulator
+CONFIG REGULATOR_ISL9305=y
+
 #networking
 CONFIG_BRIDGE=y
 CONFIG_IPV6=y
