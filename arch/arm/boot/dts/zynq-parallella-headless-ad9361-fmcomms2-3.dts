@@ -45,7 +45,7 @@
 /* "Optional FMCOMMS3 optional Up/Down Converter PMOD" */
 #define pmod_spi spi1
 
-&fpga_axi {
+&fpga {
 	rx_dma: dma@7c400000 {
 		compatible = "adi,axi-dmac-1.00.a";
 		reg = <0x7c400000 0x10000>;
