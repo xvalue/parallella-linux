@@ -85,10 +85,14 @@ static struct epiphany {
 
 	/* Module parameters */
 	bool			param_unsafe_access; /* access to fpga regs */
+	bool			param_nopm; /* disable power management */
 } epiphany = {};
 
 module_param_named(unsafe_access, epiphany.param_unsafe_access, bool, 0644);
 MODULE_PARM_DESC(unsafe_access, "Permit access to elink FPGA registers");
+
+module_param_named(nopm, epiphany.param_nopm, bool, 0444);
+MODULE_PARM_DESC(nopm, "Disable power management");
 
 static const u32 ctrlmode_hints[E_SIDE_MAX] = {
 	[E_SIDE_N] = E_CTRLMODE_NORTH,
@@ -2374,9 +2378,18 @@ static int elink_register(struct elink_device *elink)
 	list_add_tail(&elink->list, &epiphany.elink_list);
 	mutex_unlock(&epiphany.driver_lock);
 
+	/* Increase reference count if power management should be disabled */
+	if (epiphany.param_nopm) {
+		ret = epiphany_get();
+		if (ret)
+			goto err_epiphany_get;
+	}
+
+
 	dev_dbg(&elink->dev, "elink_register: registered char device\n");
 	return 0;
 
+err_epiphany_get:
 err_dev_create:
 	cdev_del(&elink->cdev);
 err_probe:
@@ -2391,6 +2404,10 @@ err_clks:
 void elink_unregister(struct elink_device *elink)
 {
 	struct list_head *curr, *next;
+
+	/* Decrease reference count to zero if power management is disabled */
+	if (epiphany.param_nopm)
+		epiphany_put();
 
 	mutex_lock(&epiphany.driver_lock);
 	list_del(&elink->list);
@@ -2733,8 +2750,10 @@ static struct elink_device *elink_of_probe(struct platform_device *pdev)
 	}
 
 	ret = elink_register(elink);
-	if (ret)
+	if (ret) {
+		dev_err(&pdev->dev, "failed to register elink: %d\n", ret);
 		return ERR_PTR(ret);
+	}
 
 	return elink;
 }
