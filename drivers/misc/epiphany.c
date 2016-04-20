@@ -2589,45 +2589,22 @@ static int elink_of_probe_supplies(struct platform_device *pdev,
 				   struct elink_device *elink)
 {
 	int ret = 0;
-	struct device_node *supply_node;
 	struct regulator *supply;
-	const char *supply_name;
 
-	/* TODO: Support more than one regulator per elink */
-	supply_node = of_parse_phandle(pdev->dev.of_node, "vdd-supply", 0);
-	if (!supply_node) {
-		dev_warn(&pdev->dev,
-			 "elink: no supply node specified, no power management.\n");
-		return 0;
-	}
-
-	ret = of_property_read_string(supply_node, "regulator-name",
-				      &supply_name);
-	if (ret) {
-		dev_info(&pdev->dev, "elink: no regulator name\n");
-		goto err_name;
-	}
-
-	supply = devm_regulator_get_optional(&pdev->dev, supply_name);
+	supply = devm_regulator_get_optional(&pdev->dev, "vdd");
 	if (IS_ERR(supply)) {
 		ret = PTR_ERR(supply);
 		if (ret == -EPROBE_DEFER) {
 			dev_info(&pdev->dev,
-				 "elink: %s regulator not ready, retry\n",
-				 supply_node->name);
+				 "elink: vdd regulator not ready, retry\n");
 		} else {
-			dev_info(&pdev->dev, "elink: no regulator %s: %d\n",
-				 supply_node->name, ret);
+			dev_info(&pdev->dev, "elink: no regulator: vdd: %d\n",
+				 ret);
 		}
-		goto err_regulator;
+		supply = NULL;
 	}
 
 	elink->supply = supply;
-
-err_name:
-err_regulator:
-	of_node_put(supply_node);
-
 	return ret;
 }
 
