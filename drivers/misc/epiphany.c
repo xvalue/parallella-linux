@@ -2596,7 +2596,7 @@ static int elink_of_probe_supplies(struct platform_device *pdev,
 		goto err_name;
 	}
 
-	supply = devm_regulator_get(&pdev->dev, supply_name);
+	supply = devm_regulator_get_optional(&pdev->dev, supply_name);
 	if (IS_ERR(supply)) {
 		ret = PTR_ERR(supply);
 		if (ret == -EPROBE_DEFER) {
