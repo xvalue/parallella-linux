@@ -2578,6 +2578,16 @@ static int elink_of_probe_supplies(struct platform_device *pdev,
 {
 	int ret = 0;
 	struct regulator *supply;
+	struct device_node *supply_node;
+
+	/* TODO: Support more than one regulator per elink */
+	supply_node = of_parse_phandle(pdev->dev.of_node, "vdd-supply", 0);
+	if (!supply_node) {
+		dev_warn(&pdev->dev,
+			 "elink: no supply node specified, no power management.\n");
+		return 0;
+	}
+	of_node_put(supply_node);
 
 	supply = devm_regulator_get_optional(&pdev->dev, "vdd");
 	if (IS_ERR(supply)) {
