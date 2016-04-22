@@ -7640,6 +7640,12 @@ L:	alsa-devel@alsa-project.org (moderated for non-subscribers)
 S:	Maintained
 F:	sound/soc/codecs/tfa9879*
 
+OH GPIO DRIVER
+M:	Ola Jeppsson <ola@adapteva.com>
+S:	Maintained
+F:	drivers/gpio/gpio-oh.c
+F:	Documentation/devicetree/bindings/gpio/gpio-oh.txt
+
 OMAP SUPPORT
 M:	Tony Lindgren <tony@atomide.com>
 L:	linux-omap@vger.kernel.org
