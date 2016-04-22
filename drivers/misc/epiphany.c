@@ -50,7 +50,7 @@ struct epiphany_vma_entry {
 	struct rcu_head		rcu_head;
 	struct vm_area_struct	*vma;
 	struct pid		*pid;
-	atomic_t		refcnt;
+	atomic_t		in_use;
 };
 
 static struct epiphany {
@@ -936,7 +936,7 @@ static int epiphany_vm_freeze(bool interruptible)
 		}
 
 		down_read(&mm->mmap_sem);
-		if (atomic_read(&vma_entry->refcnt)) {
+		if (atomic_read(&vma_entry->in_use)) {
 			struct vm_area_struct *vma = vma_entry->vma;
 			zap_vma_ptes(vma, vma->vm_start,
 				     vma->vm_end - vma->vm_start);
@@ -1102,37 +1102,7 @@ static int char_release(struct inode *inode, struct file *file)
 
 static void epiphany_vm_open(struct vm_area_struct *vma)
 {
-	int newrefcnt;
-	struct epiphany_vma_entry *vma_entry = vma_to_epiphany_vma_entry(vma);
-
-	mutex_lock(&epiphany.vma_list_lock);
-
-	if (vma_entry) {
-		pr_debug("%s: vma=%pK already in list\n", __func__, vma);
-		newrefcnt = atomic_add_return(1, &vma_entry->refcnt);
-		WARN_ON(newrefcnt < 2);
-		mutex_unlock(&epiphany.vma_list_lock);
-		return;
-	}
-
-	vma_entry = kzalloc(sizeof(*vma_entry), GFP_KERNEL);
-	if (!vma_entry) {
-		mutex_unlock(&epiphany.vma_list_lock);
-		return;
-	}
-
-	vma_entry->vma = vma;
-	vma_entry->pid = get_task_pid(current, PIDTYPE_PID);
-	atomic_set(&vma_entry->refcnt, 1);
-
-	vma->vm_private_data = vma_entry;
-
-	list_add_tail_rcu(&vma_entry->list, &epiphany.vma_list);
-
-	/* ???: Since use of the _expedited version is discouraged: is there a
-	 * way we can get rid of it without hurting performance for mmap()? */
-	synchronize_rcu_expedited();
-	mutex_unlock(&epiphany.vma_list_lock);
+	(void)vma;
 }
 
 static void vma_entry_free(struct rcu_head *rcu_head)
@@ -1147,10 +1117,15 @@ static void epiphany_vm_close(struct vm_area_struct *vma)
 {
 	struct epiphany_vma_entry *vma_entry = vma_to_epiphany_vma_entry(vma);
 
+	if (!vma_entry)
+		return;
+
 	mutex_lock(&epiphany.vma_list_lock);
-	if (atomic_dec_and_test(&vma_entry->refcnt)) {
+	if (atomic_dec_and_test(&vma_entry->in_use)) {
 		list_del_rcu(&vma_entry->list);
 		call_rcu(&vma_entry->rcu_head, vma_entry_free);
+	} else {
+		WARN_ON(true);
 	}
 	mutex_unlock(&epiphany.vma_list_lock);
 }
@@ -1215,11 +1190,52 @@ static int mesh_pfn_to_phys_pfn(struct elink_device *elink, unsigned long pfn,
 	return -EINVAL;
 }
 
+static void epiphany_vm_add_vma_entry(struct vm_area_struct *vma)
+{
+	struct epiphany_vma_entry *vma_entry;
+
+	mutex_lock(&epiphany.vma_list_lock);
+
+	/* Did another thread already insert it? */
+	if (vma_to_epiphany_vma_entry(vma)) {
+		mutex_unlock(&epiphany.vma_list_lock);
+		return;
+	}
+
+	vma_entry = kzalloc(sizeof(*vma_entry), GFP_KERNEL);
+	if (!vma_entry) {
+		mutex_unlock(&epiphany.vma_list_lock);
+		return;
+	}
+
+	vma_entry->vma = vma;
+	vma_entry->pid = get_task_pid(current, PIDTYPE_PID);
+	atomic_set(&vma_entry->in_use, 1);
+
+	vma->vm_private_data = vma_entry;
+
+	list_add_tail_rcu(&vma_entry->list, &epiphany.vma_list);
+
+	mutex_unlock(&epiphany.vma_list_lock);
+
+	/* Release mmap_sem to work around lock inversion with
+	 * epiphany_vm_freeze().
+	 */
+	up_read(&vma->vm_mm->mmap_sem);
+	/* ???: Since use of the _expedited version is discouraged: is there a
+	 * way we can get rid of it without hurting performance? */
+	synchronize_rcu_expedited();
+	down_read(&vma->vm_mm->mmap_sem);
+}
+
 static int epiphany_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
 	unsigned long phys_pfn;
 	struct elink_device *elink = vma_to_elink(vma);
 	int ret;
+
+	if (!vma_to_epiphany_vma_entry(vma))
+		epiphany_vm_add_vma_entry(vma);
 
 	if (vmf->flags & FAULT_FLAG_ALLOW_RETRY &&
 	    atomic_read(&epiphany.vm_freeze_in_progress)) {
