@@ -61,8 +61,6 @@ static struct epiphany {
 	struct list_head	mesh_list;
 
 	struct list_head	vma_list;
-	atomic_t		vm_freeze_in_progress;
-	wait_queue_head_t	vm_freeze_wait;
 
 	dev_t			devt;
 
@@ -897,8 +895,6 @@ retry:
 		mutex_lock(&epiphany.driver_lock);
 	}
 
-	atomic_inc(&epiphany.vm_freeze_in_progress);
-
 	list_for_each_entry(vma_entry, &epiphany.vma_list, list) {
 		struct task_struct *task;
 		struct mm_struct *mm;
@@ -916,7 +912,6 @@ retry:
 		if (!down_read_trylock(&mm->mmap_sem)) {
 			mmput(mm);
 			put_task_struct(task);
-			atomic_dec(&epiphany.vm_freeze_in_progress);
 			mutex_unlock(&epiphany.driver_lock);
 			schedule();
 			goto retry;
@@ -941,8 +936,6 @@ static void epiphany_vm_unfreeze(void)
 {
 	usleep_range(500, 600);
 	mutex_unlock(&epiphany.driver_lock);
-	if (atomic_dec_and_test(&epiphany.vm_freeze_in_progress))
-		wake_up_all(&epiphany.vm_freeze_wait);
 }
 
 static int epiphany_reset(void)
@@ -1197,22 +1190,6 @@ static int epiphany_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	if (mutex_lock_interruptible(&epiphany.driver_lock)) {
 		ret = -ERESTARTSYS;
 		goto out;
-	}
-
-	if (vmf->flags & FAULT_FLAG_ALLOW_RETRY &&
-	    atomic_read(&epiphany.vm_freeze_in_progress)) {
-		pr_debug_ratelimited("%s: VMA freeze detected. Stalling process %s (pid: %d)\n",
-				     __func__, current->comm,
-				     task_pid_nr(current));
-
-		mutex_unlock(&epiphany.driver_lock);
-
-		if (!(vmf->flags & FAULT_FLAG_RETRY_NOWAIT)) {
-			up_read(&vma->vm_mm->mmap_sem);
-			wait_event_interruptible(epiphany.vm_freeze_wait,
-				!atomic_read(&epiphany.vm_freeze_in_progress));
-		}
-		return VM_FAULT_RETRY;
 	}
 
 	if (epiphany.thermal_disallow) {
@@ -2811,8 +2788,6 @@ static void __init init_epiphany(void)
 	INIT_LIST_HEAD(&epiphany.mesh_list);
 
 	INIT_LIST_HEAD(&epiphany.vma_list);
-	init_waitqueue_head(&epiphany.vm_freeze_wait);
-	atomic_set(&epiphany.vm_freeze_in_progress, 0);
 
 	epiphany.thermal_disallow = false;
 
