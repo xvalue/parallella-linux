@@ -885,9 +885,14 @@ static irqreturn_t elink_mailbox_irq_handler(int irq, void *dev_id)
 
 static int epiphany_vm_freeze(bool interruptible)
 {
+	unsigned long jiffies_expire = jiffies + HZ * 10;
 	struct epiphany_vma_entry *vma_entry;
 
 retry:
+	/* Give up after trying 10 seconds */
+	if (time_after(jiffies, jiffies_expire))
+		return -EBUSY;
+
 	if (interruptible) {
 		if (mutex_lock_interruptible(&epiphany.driver_lock))
 			return -ERESTARTSYS;
