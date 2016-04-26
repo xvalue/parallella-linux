@@ -1082,15 +1082,11 @@ static int char_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static void epiphany_vm_add_vma_entry(struct vm_area_struct *vma)
+static void epiphany_vm_open(struct vm_area_struct *vma)
 {
 	struct epiphany_vma_entry *vma_entry;
 
 	mutex_lock(&epiphany.driver_lock);
-
-	/* Did another thread already insert it? */
-	if (vma_to_epiphany_vma_entry(vma))
-		goto out;
 
 	vma_entry = kzalloc(sizeof(*vma_entry), GFP_KERNEL);
 	if (!vma_entry)
@@ -1247,6 +1243,7 @@ out:
 }
 
 static const struct vm_operations_struct epiphany_vm_ops = {
+	.open = epiphany_vm_open,
 	.close = epiphany_vm_close,
 	.fault = epiphany_vm_fault,
 #ifdef CONFIG_HAVE_IOREMAP_PROT
@@ -1275,7 +1272,7 @@ static int _elink_char_mmap(struct elink_device *elink,
 	list_for_each_entry(mapping, &elink->mappings_list, list) {
 		if (mapping->emesh_start <= off &&
 		    off + size <= mapping->emesh_start + mapping->size) {
-			epiphany_vm_add_vma_entry(vma);
+			epiphany_vm_open(vma);
 			return 0;
 		}
 	}
@@ -1284,7 +1281,7 @@ static int _elink_char_mmap(struct elink_device *elink,
 	    off + size <= elink->regs_start + elink->regs_size) {
 		if (epiphany.param_unsafe_access) {
 			vma->vm_flags |= VM_IO;
-			epiphany_vm_add_vma_entry(vma);
+			epiphany_vm_open(vma);
 			return 0;
 		}
 		else
@@ -1299,7 +1296,7 @@ static int _elink_char_mmap(struct elink_device *elink,
 	phys_off = core_phys | (off & COREID_MASK);
 	if (!ret && phys_off - elink->emesh_start + size <= elink->emesh_size) {
 		vma->vm_flags |= VM_IO;
-		epiphany_vm_add_vma_entry(vma);
+		epiphany_vm_open(vma);
 		return 0;
 	}
 
