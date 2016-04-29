@@ -27,7 +27,7 @@
 
 #define DRIVERNAME "oh-gpio"
 
-#define	OH_GPIO_NR_GPIOS 64
+#define	OH_GPIO_MAX_NR_GPIOS 64
 
 #define OH_GPIO_DIR     0x00 /* set direction of pin */
 #define OH_GPIO_IN      0x08 /* input data (read only) */
@@ -404,15 +404,35 @@ MODULE_DEVICE_TABLE(of, oh_gpio_of_match);
 static int oh_gpio_probe(struct platform_device *pdev)
 {
 	int ret;
+	u32 ngpios;
 	struct oh_gpio *gpio;
 	struct gpio_chip *chip;
 	struct resource *res;
+	struct device_node *np = pdev->dev.of_node;
 
 	gpio = devm_kzalloc(&pdev->dev, sizeof(*gpio), GFP_KERNEL);
 	if (!gpio)
 		return -ENOMEM;
 
 	platform_set_drvdata(pdev, gpio);
+
+	ret = of_property_read_u32(np, "ngpios", &ngpios);
+	if (ret == -ENOENT) {
+		dev_info(&pdev->dev,
+			 "ngpios property missing, defaulting to %u\n",
+			 OH_GPIO_MAX_NR_GPIOS);
+		ngpios = OH_GPIO_MAX_NR_GPIOS;
+	} else if (ret) {
+		dev_err(&pdev->dev, "ngpios property is not valid\n");
+		return ret;
+	}
+
+	if (ngpios > OH_GPIO_MAX_NR_GPIOS) {
+		dev_err(&pdev->dev,
+			"ngpios property is %u, max allowed is %u\n",
+			(unsigned) ngpios, OH_GPIO_MAX_NR_GPIOS);
+		return -EINVAL;
+	}
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	gpio->base_addr = devm_ioremap_resource(&pdev->dev, res);
@@ -440,7 +460,7 @@ static int oh_gpio_probe(struct platform_device *pdev)
 	chip->owner = THIS_MODULE;
 	chip->dev = &pdev->dev;
 	chip->base = -1;
-	chip->ngpio = OH_GPIO_NR_GPIOS;
+	chip->ngpio = (u16) ngpios;
 	chip->get = oh_gpio_get_value;
 	chip->set = oh_gpio_set_value;
 	chip->get_direction = oh_gpio_get_direction;
