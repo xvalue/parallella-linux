@@ -1,0 +1,56 @@
+/*
+ * Copyright (c) 2016 Parallella Foundation
+ *
+ * This software is licensed under the terms of the GNU General Public
+ * License version 2, as published by the Free Software Foundation, and
+ * may be copied, distributed, and modified under those terms.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+/dts-v1/;
+#include "zynq-parallella1.dtsi"
+
+/ {
+	model = "Adapteva Parallella Board with headless GPIO";
+};
+
+&amba {
+	gpio1: gpio1@82000000 {
+		compatible = "oh,gpio";
+		reg = <0x82000000 0x100>;
+		interrupt-parent = <&intc>;
+		interrupts = <0 54 4>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+		ngpios = <24>;
+	};
+};
+
+&usb_phy0 {
+	status = "okay";
+};
+
+&usb_phy1 {
+	status = "okay";
+};
+
+&usb0 {
+	status = "okay";
+};
+
+&usb1 {
+	status = "okay";
+};
+
+&elink0 {
+	status = "disabled";
+};
+
+&i2c0 {
+	status = "disabled";
+};
