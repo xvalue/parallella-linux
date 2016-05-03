@@ -12,9 +12,6 @@
  * file called COPYING.
  */
 
-
-/* ???: Interrupts implementation likely broken. Needs testing!!! */
-
 #include <linux/bitops.h>
 #include <linux/gpio/driver.h>
 #include <linux/init.h>
@@ -270,16 +267,6 @@ static void oh_gpio_irq_ack(struct irq_data *irq_data)
 }
 
 /**
- * oh_gpio_irq_enable - Enable interrupts for a gpio pin
- * @irq_data:	irq data containing irq number of gpio pin
- */
-static void oh_gpio_irq_enable(struct irq_data *irq_data)
-{
-	oh_gpio_irq_ack(irq_data);
-	oh_gpio_irq_unmask(irq_data);
-}
-
-/**
  * oh_gpio_irq_set_type - Set the irq type for a gpio pin
  * @irq_data:	irq data containing irq number of gpio pin
  * @type:	interrupt type that is to be set for the gpio pin
@@ -338,7 +325,6 @@ static int oh_gpio_irq_set_type(struct irq_data *irq_data, unsigned type)
 
 static struct irq_chip oh_gpio_irqchip = {
 	.name		= DRIVERNAME,
-	.irq_enable	= oh_gpio_irq_enable,
 	.irq_ack	= oh_gpio_irq_ack,
 	.irq_mask	= oh_gpio_irq_mask,
 	.irq_unmask	= oh_gpio_irq_unmask,
@@ -350,46 +336,38 @@ static struct irq_chip oh_gpio_irqchip = {
  * @irq:	oh_gpio irq number
  * @devid:	pointer to oh_gpio struct
  *
- * Reads the interrupt latch register and interrupt mask register to get the
- * gpio pin number(s) that have pending interrupts. It then calls the generic
- * irq handlers for those pins irqs.
- *
- * Note: Assumes ilat is NOT MASKED by imask (but instead irq_out is),
- * which is not implemented in HDL now.
+ * Reads the interrupt latch register register to get the gpio pin number(s)
+ * that have pending interrupts. It then calls the generic irq handlers for
+ * those pins irqs.
  *
  * Return: IRQ_HANDLED if any interrupts were handled, IRQ_NONE otherwise.
  */
 static irqreturn_t oh_gpio_irq_handler(int irq, void *dev_id)
 {
-	u64 pending, ilat, imask;
-	unsigned long flags, pending_lo, pending_hi;
+	u64 ilat;
+	unsigned long flags, ilat_lo, ilat_hi;
 	int offset;
 	struct oh_gpio *gpio = dev_id;
 	struct irq_domain *irqdomain = gpio->chip.irqdomain;
 
 	spin_lock_irqsave(&gpio->lock, flags);
 	ilat = oh_gpio_reg_read(gpio, OH_GPIO_ILAT);
-	imask = oh_gpio_reg_read(gpio, OH_GPIO_IMASK);
 	spin_unlock_irqrestore(&gpio->lock, flags);
 
-	/* !!!: Assumes ilat is NOT MASKED by imask (but instead irq_out is),
-	 * which is not implemented in HDL now
-	 */
-
-	/* Only unmasked interrupts are pending */
-	pending = ilat & ~imask;
+	if (!ilat)
+		return IRQ_NONE;
 
 	/* No generic 64-bit for_each_set_bit. Need to split in high/low */
-	pending_lo = (unsigned long) ((pending >>  0) & 0xffffffff);
-	pending_hi = (unsigned long) ((pending >> 32) & 0xffffffff);
+	ilat_lo = (unsigned long) ((ilat >>  0) & 0xffffffff);
+	ilat_hi = (unsigned long) ((ilat >> 32) & 0xffffffff);
 
-	for_each_set_bit(offset, &pending_lo, 32)
+	for_each_set_bit(offset, &ilat_lo, 32)
 		generic_handle_irq(irq_find_mapping(irqdomain, offset));
 
-	for_each_set_bit(offset, &pending_hi, 32)
+	for_each_set_bit(offset, &ilat_hi, 32)
 		generic_handle_irq(irq_find_mapping(irqdomain, 32 + offset));
 
-	return pending ? IRQ_HANDLED : IRQ_NONE;
+	return IRQ_HANDLED;
 }
 
 static const struct of_device_id oh_gpio_of_match[] = {
