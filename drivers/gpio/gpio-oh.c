@@ -36,7 +36,7 @@
 #define OH_GPIO_OUTSET  0x20 /* alias, sets specific bits in GPIO_OUT */
 #define OH_GPIO_OUTXOR  0x28 /* alias, toggles specific bits in GPIO_OUT */
 #define OH_GPIO_IMASK   0x30 /* interrupt mask */
-#define OH_GPIO_ITYPE   0x38 /* interrupt type (level/edge) */
+#define OH_GPIO_ITYPE   0x38 /* interrupt type (edge=0/level=1) */
 #define OH_GPIO_IPOL    0x40 /* interrupt polarity (hi/rising / low/falling) */
 #define OH_GPIO_ILAT    0x48 /* latched interrupts (read only) */
 #define OH_GPIO_ILATCLR 0x50 /* clear an interrupt */
@@ -304,19 +304,19 @@ static int oh_gpio_irq_set_type(struct irq_data *irq_data, unsigned type)
 
 	switch (type) {
 	case IRQ_TYPE_EDGE_RISING:
-		itype	|= mask;
+		itype	&= ~mask;
 		ipol	|= mask;
 		break;
 	case IRQ_TYPE_EDGE_FALLING:
-		itype	|= mask;
+		itype	&= ~mask;
 		ipol	&= ~mask;
 		break;
 	case IRQ_TYPE_LEVEL_HIGH:
-		itype	&= ~mask;
+		itype	|= mask;
 		ipol	|= mask;
 		break;
 	case IRQ_TYPE_LEVEL_LOW:
-		itype	&= ~mask;
+		itype	|= mask;
 		ipol	&= ~mask;
 		break;
 	default:
