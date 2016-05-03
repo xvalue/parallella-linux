@@ -44,7 +44,6 @@
 struct oh_gpio {
 	void __iomem *base_addr;
 	struct gpio_chip chip;
-	int irq;
 	spinlock_t lock;
 };
 
@@ -409,7 +408,7 @@ MODULE_DEVICE_TABLE(of, oh_gpio_of_match);
  */
 static int oh_gpio_probe(struct platform_device *pdev)
 {
-	int ret;
+	int ret, irq;
 	u32 ngpios;
 	struct oh_gpio *gpio;
 	struct gpio_chip *chip;
@@ -445,13 +444,13 @@ static int oh_gpio_probe(struct platform_device *pdev)
 	if (IS_ERR(gpio->base_addr))
 		return PTR_ERR(gpio->base_addr);
 
-	gpio->irq = platform_get_irq(pdev, 0);
-	if (gpio->irq < 0) {
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0) {
 		dev_err(&pdev->dev, "invalid IRQ\n");
-		return gpio->irq;
+		return irq;
 	}
 
-	ret = devm_request_irq(&pdev->dev, gpio->irq, oh_gpio_irq_handler, 0,
+	ret = devm_request_irq(&pdev->dev, irq, oh_gpio_irq_handler, 0,
 			       dev_name(&pdev->dev), gpio);
 	if (ret) {
 		dev_err(&pdev->dev, "could not request IRQ\n");
