@@ -90,6 +90,25 @@ static inline u64 oh_gpio_reg_read(struct oh_gpio *gpio, unsigned long offset)
 }
 
 /**
+ * oh_gpio_get_value_locked - Get value of the specified pin
+ * @chip:	gpio chip device
+ * @pin:	gpio pin number
+ *
+ * Note: Caller must hold gpio->lock.
+ *
+ * Return: 0 if the pin is low, 1 if pin is high.
+ */
+static int oh_gpio_get_value_locked(struct gpio_chip *chip, unsigned pin)
+{
+	u64 data;
+	struct oh_gpio *gpio = to_oh_gpio(chip);
+
+	data = oh_gpio_reg_read(gpio, OH_GPIO_IN);
+
+	return (data >> pin) & 1;
+}
+
+/**
  * oh_gpio_get_value - Get value of the specified pin
  * @chip:	gpio chip device
  * @pin:	gpio pin number
@@ -98,15 +117,15 @@ static inline u64 oh_gpio_reg_read(struct oh_gpio *gpio, unsigned long offset)
  */
 static int oh_gpio_get_value(struct gpio_chip *chip, unsigned pin)
 {
-	u64 data;
+	int ret;
 	unsigned long flags;
 	struct oh_gpio *gpio = to_oh_gpio(chip);
 
 	spin_lock_irqsave(&gpio->lock, flags);
-	data = oh_gpio_reg_read(gpio, OH_GPIO_IN);
+	ret = oh_gpio_get_value_locked(chip, pin);
 	spin_unlock_irqrestore(&gpio->lock, flags);
 
-	return (data >> pin) & 1;
+	return ret;
 }
 
 /**
@@ -267,6 +286,29 @@ static void oh_gpio_irq_ack(struct irq_data *irq_data)
 }
 
 /**
+ * oh_gpio_irq_next_edge_locked - Configure IPOL for next edge
+ * @gpio:	oh gpio structure
+ * @pin:	gpio pin number
+ *
+ * Note: Caller must hold gpio->lock.
+ */
+static void oh_gpio_irq_next_edge_locked(struct oh_gpio *gpio, unsigned pin)
+{
+	u64 ipol, mask;
+
+	mask = BIT_ULL(pin);
+
+	ipol = oh_gpio_reg_read(gpio, OH_GPIO_IPOL);
+
+	if (oh_gpio_get_value_locked(&gpio->chip, pin))
+		ipol &= ~mask;
+	else
+		ipol |= mask;
+
+	oh_gpio_reg_write(ipol, gpio, OH_GPIO_IPOL);
+}
+
+/**
  * oh_gpio_irq_set_type - Set the irq type for a gpio pin
  * @irq_data:	irq data containing irq number of gpio pin
  * @type:	interrupt type that is to be set for the gpio pin
@@ -290,6 +332,8 @@ static int oh_gpio_irq_set_type(struct irq_data *irq_data, unsigned type)
 	ipol = oh_gpio_reg_read(gpio, OH_GPIO_IPOL);
 
 	switch (type) {
+	case IRQ_TYPE_EDGE_BOTH:
+		/* fall through, handle below */
 	case IRQ_TYPE_EDGE_RISING:
 		itype	&= ~mask;
 		ipol	|= mask;
@@ -312,7 +356,11 @@ static int oh_gpio_irq_set_type(struct irq_data *irq_data, unsigned type)
 	}
 
 	oh_gpio_reg_write(itype, gpio, OH_GPIO_ITYPE);
-	oh_gpio_reg_write(ipol, gpio, OH_GPIO_IPOL);
+
+	if (type == IRQ_TYPE_EDGE_BOTH)
+		oh_gpio_irq_next_edge_locked(gpio, pin);
+	else
+		oh_gpio_reg_write(ipol, gpio, OH_GPIO_IPOL);
 
 	spin_unlock_irqrestore(&gpio->lock, flags);
 
@@ -345,8 +393,11 @@ static struct irq_chip oh_gpio_irqchip = {
 static irqreturn_t oh_gpio_irq_handler(int irq, void *dev_id)
 {
 	u64 ilat;
+	unsigned child_irq_no;
 	unsigned long flags, ilat_lo, ilat_hi;
 	int offset;
+	struct irq_desc *child_desc;
+	u32 child_type;
 	struct oh_gpio *gpio = dev_id;
 	struct irq_domain *irqdomain = gpio->chip.irqdomain;
 
@@ -361,11 +412,35 @@ static irqreturn_t oh_gpio_irq_handler(int irq, void *dev_id)
 	ilat_lo = (unsigned long) ((ilat >>  0) & 0xffffffff);
 	ilat_hi = (unsigned long) ((ilat >> 32) & 0xffffffff);
 
-	for_each_set_bit(offset, &ilat_lo, 32)
-		generic_handle_irq(irq_find_mapping(irqdomain, offset));
+	for_each_set_bit(offset, &ilat_lo, 32) {
+		child_irq_no = irq_find_mapping(irqdomain, offset);
+		child_desc = irq_to_desc(child_irq_no);
+		child_type = irqd_get_trigger_type(&child_desc->irq_data);
 
-	for_each_set_bit(offset, &ilat_hi, 32)
-		generic_handle_irq(irq_find_mapping(irqdomain, 32 + offset));
+		/* Toggle edge for pin with both edges triggering enabled */
+		if (child_type == IRQ_TYPE_EDGE_BOTH) {
+			spin_lock_irqsave(&gpio->lock, flags);
+			oh_gpio_irq_next_edge_locked(gpio, offset);
+			spin_unlock_irqrestore(&gpio->lock, flags);
+		}
+
+		generic_handle_irq_desc(child_desc);
+	}
+
+	for_each_set_bit(offset, &ilat_hi, 32) {
+		child_irq_no = irq_find_mapping(irqdomain, 32 + offset);
+		child_desc = irq_to_desc(child_irq_no);
+		child_type = irqd_get_trigger_type(&child_desc->irq_data);
+
+		/* Toggle edge for pin with both edges triggering enabled */
+		if (child_type == IRQ_TYPE_EDGE_BOTH) {
+			spin_lock_irqsave(&gpio->lock, flags);
+			oh_gpio_irq_next_edge_locked(gpio, 32 + offset);
+			spin_unlock_irqrestore(&gpio->lock, flags);
+		}
+
+		generic_handle_irq_desc(child_desc);
+	}
 
 	return IRQ_HANDLED;
 }
