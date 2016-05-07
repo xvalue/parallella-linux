@@ -380,6 +380,40 @@ static struct irq_chip oh_gpio_irqchip = {
 };
 
 /**
+ * oh_gpio_irq_handler_for_each - IRQ handler helper
+ * @gpio:	oh gpio structure
+ * @ilat:	portion of ilat register
+ * @base:	base pin number
+ *
+ * Calls the generic irq handlers for gpio pins with pending interrupts.
+ */
+static void oh_gpio_irq_handler_for_each(struct oh_gpio *gpio,
+					 unsigned long *ilat, int base)
+{
+	int offset;
+	unsigned long flags;
+	unsigned child_irq_no;
+	struct irq_desc *child_desc;
+	u32 child_type;
+	struct irq_domain *irqdomain = gpio->chip.irqdomain;
+
+	for_each_set_bit(offset, ilat, 32) {
+		child_irq_no = irq_find_mapping(irqdomain, base + offset);
+		child_desc = irq_to_desc(child_irq_no);
+		child_type = irqd_get_trigger_type(&child_desc->irq_data);
+
+		/* Toggle edge for pin with both edges triggering enabled */
+		if (child_type == IRQ_TYPE_EDGE_BOTH) {
+			spin_lock_irqsave(&gpio->lock, flags);
+			oh_gpio_irq_next_edge_locked(gpio, base + offset);
+			spin_unlock_irqrestore(&gpio->lock, flags);
+		}
+
+		generic_handle_irq_desc(child_desc);
+	}
+}
+
+/**
  * oh_gpio_irq_handler - IRQ handler
  * @irq:	oh_gpio irq number
  * @devid:	pointer to oh_gpio struct
@@ -393,13 +427,8 @@ static struct irq_chip oh_gpio_irqchip = {
 static irqreturn_t oh_gpio_irq_handler(int irq, void *dev_id)
 {
 	u64 ilat;
-	unsigned child_irq_no;
 	unsigned long flags, ilat_lo, ilat_hi;
-	int offset;
-	struct irq_desc *child_desc;
-	u32 child_type;
 	struct oh_gpio *gpio = dev_id;
-	struct irq_domain *irqdomain = gpio->chip.irqdomain;
 
 	spin_lock_irqsave(&gpio->lock, flags);
 	ilat = oh_gpio_reg_read(gpio, OH_GPIO_ILAT);
@@ -412,35 +441,8 @@ static irqreturn_t oh_gpio_irq_handler(int irq, void *dev_id)
 	ilat_lo = (unsigned long) ((ilat >>  0) & 0xffffffff);
 	ilat_hi = (unsigned long) ((ilat >> 32) & 0xffffffff);
 
-	for_each_set_bit(offset, &ilat_lo, 32) {
-		child_irq_no = irq_find_mapping(irqdomain, offset);
-		child_desc = irq_to_desc(child_irq_no);
-		child_type = irqd_get_trigger_type(&child_desc->irq_data);
-
-		/* Toggle edge for pin with both edges triggering enabled */
-		if (child_type == IRQ_TYPE_EDGE_BOTH) {
-			spin_lock_irqsave(&gpio->lock, flags);
-			oh_gpio_irq_next_edge_locked(gpio, offset);
-			spin_unlock_irqrestore(&gpio->lock, flags);
-		}
-
-		generic_handle_irq_desc(child_desc);
-	}
-
-	for_each_set_bit(offset, &ilat_hi, 32) {
-		child_irq_no = irq_find_mapping(irqdomain, 32 + offset);
-		child_desc = irq_to_desc(child_irq_no);
-		child_type = irqd_get_trigger_type(&child_desc->irq_data);
-
-		/* Toggle edge for pin with both edges triggering enabled */
-		if (child_type == IRQ_TYPE_EDGE_BOTH) {
-			spin_lock_irqsave(&gpio->lock, flags);
-			oh_gpio_irq_next_edge_locked(gpio, 32 + offset);
-			spin_unlock_irqrestore(&gpio->lock, flags);
-		}
-
-		generic_handle_irq_desc(child_desc);
-	}
+	oh_gpio_irq_handler_for_each(gpio, &ilat_lo, 0);
+	oh_gpio_irq_handler_for_each(gpio, &ilat_hi, 32);
 
 	return IRQ_HANDLED;
 }
