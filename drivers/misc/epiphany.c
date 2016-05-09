@@ -47,10 +47,9 @@
 
 struct epiphany_vma_entry {
 	struct list_head	list;
-	struct rcu_head		rcu_head;
 	struct vm_area_struct	*vma;
 	struct pid		*pid;
-	atomic_t		refcnt;
+	atomic_t		in_use;
 };
 
 static struct epiphany {
@@ -62,9 +61,6 @@ static struct epiphany {
 	struct list_head	mesh_list;
 
 	struct list_head	vma_list;
-	struct mutex		vma_list_lock; /* protects list for updates */
-	atomic_t		vm_freeze_in_progress;
-	wait_queue_head_t	vm_freeze_wait;
 
 	dev_t			devt;
 
@@ -901,29 +897,24 @@ static irqreturn_t elink_mailbox_irq_handler(int irq, void *dev_id)
 
 static int epiphany_vm_freeze(bool interruptible)
 {
-	int ret = 0;
+	unsigned long jiffies_expire = jiffies + HZ * 10;
 	struct epiphany_vma_entry *vma_entry;
 
-	atomic_inc(&epiphany.vm_freeze_in_progress);
+retry:
+	/* Give up after trying 10 seconds */
+	if (time_after(jiffies, jiffies_expire))
+		return -EBUSY;
 
 	if (interruptible) {
-		if (mutex_lock_interruptible(&epiphany.driver_lock)) {
-			ret = -ERESTARTSYS;
-			goto out;
-		}
+		if (mutex_lock_interruptible(&epiphany.driver_lock))
+			return -ERESTARTSYS;
 	} else {
 		mutex_lock(&epiphany.driver_lock);
 	}
 
-	rcu_read_lock();
-	list_for_each_entry_rcu(vma_entry, &epiphany.vma_list, list) {
+	list_for_each_entry(vma_entry, &epiphany.vma_list, list) {
 		struct task_struct *task;
 		struct mm_struct *mm;
-
-		if (!vma_entry) {
-			pr_err("vma_entry==NULL rcu bug?\n");
-			BUG();
-		}
 
 		task = get_pid_task(vma_entry->pid, PIDTYPE_PID);
 		if (!task)
@@ -935,8 +926,14 @@ static int epiphany_vm_freeze(bool interruptible)
 			continue;
 		}
 
-		down_read(&mm->mmap_sem);
-		if (atomic_read(&vma_entry->refcnt)) {
+		if (!down_read_trylock(&mm->mmap_sem)) {
+			mmput(mm);
+			put_task_struct(task);
+			mutex_unlock(&epiphany.driver_lock);
+			schedule();
+			goto retry;
+		}
+		if (atomic_read(&vma_entry->in_use)) {
 			struct vm_area_struct *vma = vma_entry->vma;
 			zap_vma_ptes(vma, vma->vm_start,
 				     vma->vm_end - vma->vm_start);
@@ -946,21 +943,16 @@ static int epiphany_vm_freeze(bool interruptible)
 		mmput(mm);
 		put_task_struct(task);
 	}
-	rcu_read_unlock();
 
-out:
-	if (ret)
-		if (atomic_dec_and_test(&epiphany.vm_freeze_in_progress))
-			wake_up_all(&epiphany.vm_freeze_wait);
+	usleep_range(500, 600);
 
-	return ret;
+	return 0;
 }
 
 static void epiphany_vm_unfreeze(void)
 {
+	usleep_range(500, 600);
 	mutex_unlock(&epiphany.driver_lock);
-	if (atomic_dec_and_test(&epiphany.vm_freeze_in_progress))
-		wake_up_all(&epiphany.vm_freeze_wait);
 }
 
 static int epiphany_reset(void)
@@ -1102,57 +1094,48 @@ static int char_release(struct inode *inode, struct file *file)
 
 static void epiphany_vm_open(struct vm_area_struct *vma)
 {
-	int newrefcnt;
-	struct epiphany_vma_entry *vma_entry = vma_to_epiphany_vma_entry(vma);
+	struct epiphany_vma_entry *vma_entry;
 
-	mutex_lock(&epiphany.vma_list_lock);
-
-	if (vma_entry) {
-		pr_debug("%s: vma=%pK already in list\n", __func__, vma);
-		newrefcnt = atomic_add_return(1, &vma_entry->refcnt);
-		WARN_ON(newrefcnt < 2);
-		mutex_unlock(&epiphany.vma_list_lock);
-		return;
-	}
+	mutex_lock(&epiphany.driver_lock);
 
 	vma_entry = kzalloc(sizeof(*vma_entry), GFP_KERNEL);
-	if (!vma_entry) {
-		mutex_unlock(&epiphany.vma_list_lock);
-		return;
-	}
+	if (!vma_entry)
+		goto out;
 
 	vma_entry->vma = vma;
 	vma_entry->pid = get_task_pid(current, PIDTYPE_PID);
-	atomic_set(&vma_entry->refcnt, 1);
+	atomic_set(&vma_entry->in_use, 1);
 
 	vma->vm_private_data = vma_entry;
 
-	list_add_tail_rcu(&vma_entry->list, &epiphany.vma_list);
+	list_add_tail(&vma_entry->list, &epiphany.vma_list);
 
-	/* ???: Since use of the _expedited version is discouraged: is there a
-	 * way we can get rid of it without hurting performance for mmap()? */
-	synchronize_rcu_expedited();
-	mutex_unlock(&epiphany.vma_list_lock);
-}
-
-static void vma_entry_free(struct rcu_head *rcu_head)
-{
-	struct epiphany_vma_entry *e =
-		container_of(rcu_head, struct epiphany_vma_entry, rcu_head);
-	put_pid(e->pid);
-	kfree(e);
+out:
+	mutex_unlock(&epiphany.driver_lock);
 }
 
 static void epiphany_vm_close(struct vm_area_struct *vma)
 {
-	struct epiphany_vma_entry *vma_entry = vma_to_epiphany_vma_entry(vma);
+	struct epiphany_vma_entry *vma_entry;
 
-	mutex_lock(&epiphany.vma_list_lock);
-	if (atomic_dec_and_test(&vma_entry->refcnt)) {
-		list_del_rcu(&vma_entry->list);
-		call_rcu(&vma_entry->rcu_head, vma_entry_free);
+	mutex_lock(&epiphany.driver_lock);
+
+	vma_entry = vma_to_epiphany_vma_entry(vma);
+
+	if (!vma_entry) {
+		mutex_unlock(&epiphany.driver_lock);
+		return;
 	}
-	mutex_unlock(&epiphany.vma_list_lock);
+
+	if (atomic_dec_and_test(&vma_entry->in_use)) {
+		list_del(&vma_entry->list);
+		put_pid(vma_entry->pid);
+		kfree(vma_entry);
+	} else {
+		WARN_ON(true);
+	}
+	vma->vm_private_data = NULL;
+	mutex_unlock(&epiphany.driver_lock);
 }
 
 /* Epiphany mesh pfn to phys pfn
@@ -1221,27 +1204,10 @@ static int epiphany_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	struct elink_device *elink = vma_to_elink(vma);
 	int ret;
 
-	if (vmf->flags & FAULT_FLAG_ALLOW_RETRY &&
-	    atomic_read(&epiphany.vm_freeze_in_progress)) {
-		pr_debug_ratelimited("%s: VMA freeze detected. Stalling process %s (pid: %d)\n",
-				     __func__, current->comm,
-				     task_pid_nr(current));
-		if (!(vmf->flags & FAULT_FLAG_RETRY_NOWAIT)) {
-			up_read(&vma->vm_mm->mmap_sem);
-			wait_event_interruptible(epiphany.vm_freeze_wait,
-				!atomic_read(&epiphany.vm_freeze_in_progress));
-		}
-		return VM_FAULT_RETRY;
-	}
-
-	/* Release mmap_sem to work around lock inversion with
-	 * epiphany_vm_freeze().
-	 */
-	up_read(&vma->vm_mm->mmap_sem);
-	ret = mutex_lock_interruptible(&epiphany.driver_lock);
-	down_read(&vma->vm_mm->mmap_sem);
-	if (ret)
+	if (mutex_lock_interruptible(&epiphany.driver_lock)) {
+		ret = -ERESTARTSYS;
 		goto out;
+	}
 
 	if (epiphany.thermal_disallow) {
 		pr_info_ratelimited("%s: Temperature outside operating range. Sending SIGBUS to process %s (pid: %d)\n",
@@ -2839,9 +2805,6 @@ static void __init init_epiphany(void)
 	INIT_LIST_HEAD(&epiphany.mesh_list);
 
 	INIT_LIST_HEAD(&epiphany.vma_list);
-	mutex_init(&epiphany.vma_list_lock);
-	init_waitqueue_head(&epiphany.vm_freeze_wait);
-	atomic_set(&epiphany.vm_freeze_in_progress, 0);
 
 	epiphany.thermal_disallow = false;
 
