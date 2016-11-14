@@ -1230,6 +1230,7 @@ out:
 	case 0:
 	case -ERESTARTSYS:
 	case -EINTR:
+	case -EBUSY:
 		return VM_FAULT_NOPAGE;
 	default:
 		return VM_FAULT_SIGBUS;
