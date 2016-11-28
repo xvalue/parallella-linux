@@ -167,58 +167,104 @@ static void adv7511_set_colormap(struct adv7511 *adv7511, bool enable,
 				 unsigned int scaling_factor)
 {
 	unsigned int i;
+    printk(KERN_WARNING, "START set_colormap()\n");
 
 	regmap_update_bits(adv7511->regmap, ADV7511_REG_CSC_UPPER(1),
 			   ADV7511_CSC_UPDATE_MODE, ADV7511_CSC_UPDATE_MODE);
 
+    int blub = 0;
+	regmap_read(adv7511->regmap, ADV7511_REG_CSC_UPPER(1), &blub);
+    printk(KERN_WARNING, "regmap_update_bits, REG_CSC_UPPER(1) REGISTER %d REG_VALUE%d\n", ADV7511_REG_CSC_UPPER(1), blub);
+
+
 	if (enable) {
 		for (i = 0; i < 12; ++i) {
+            int value = 0; 
 			regmap_update_bits(adv7511->regmap,
 					   ADV7511_REG_CSC_UPPER(i),
 					   0x1f, coeff[i] >> 8);
+
+            regmap_read(adv7511->regmap, ADV7511_REG_CSC_UPPER(1), &value);
+            printk(KERN_WARNING, "1.loop Register %d value %d\n",ADV7511_REG_CSC_UPPER(i), value); 
+
 			regmap_write(adv7511->regmap,
 				     ADV7511_REG_CSC_LOWER(i),
 				     coeff[i] & 0xff);
+
+            regmap_read(adv7511->regmap, ADV7511_REG_CSC_UPPER(1), &value);
+            printk(KERN_WARNING, "2.loop Register %d value %d\n",ADV7511_REG_CSC_LOWER(i), value); 
 		}
 	}
 
-	if (enable)
+	if (enable) {
+        int value = 0;
 		regmap_update_bits(adv7511->regmap, ADV7511_REG_CSC_UPPER(0),
 				   0xe0, 0x80 | (scaling_factor << 5));
-	else
-		regmap_update_bits(adv7511->regmap, ADV7511_REG_CSC_UPPER(0),
-				   0x80, 0x00);
+        regmap_read(adv7511->regmap, ADV7511_REG_CSC_UPPER(0), &value);
+        printk(KERN_WARNING, "enable=true Register %d Value %d\n", ADV7511_REG_CSC_UPPER(0), value);
+    }
+	else {
+        int value = 0;
+        regmap_update_bits(adv7511->regmap, ADV7511_REG_CSC_UPPER(0),
+                0x80, 0x00);
+        regmap_read(adv7511->regmap, ADV7511_REG_CSC_UPPER(0), &value);
+        printk(KERN_WARNING, "enable=false Register %d Value %d\n", ADV7511_REG_CSC_UPPER(0), value);
+        }
 
+    int value = 0;
 	regmap_update_bits(adv7511->regmap, ADV7511_REG_CSC_UPPER(1),
 			   ADV7511_CSC_UPDATE_MODE, 0);
+    regmap_read(adv7511->regmap, ADV7511_REG_CSC_UPPER(1), &value);
+    printk(KERN_WARNING, "Zeile %d Register %d Value %d\n", __LINE__, ADV7511_REG_CSC_UPPER(0), value);
+
+    printk(KERN_WARNING, "END OF set_colormap()");
 }
 
 static int adv7511_packet_enable(struct adv7511 *adv7511, unsigned int packet)
 {
-	if (packet & 0xff)
+    printk(KERN_WARNING, "START packet_enable()");
+	if (packet & 0xff) {
+        int value = 0;
 		regmap_update_bits(adv7511->regmap, ADV7511_REG_PACKET_ENABLE0,
 				   packet, 0xff);
+        regmap_read(adv7511->regmap, ADV7511_REG_PACKET_ENABLE0, &value);
+        printk(KERN_WARNING, "packet_enable (0xff) Packet %d Register %d Value %d", packet, ADV7511_REG_PACKET_ENABLE0, value);
+    }
 
 	if (packet & 0xff00) {
+        int value = 0;
 		packet >>= 8;
 		regmap_update_bits(adv7511->regmap, ADV7511_REG_PACKET_ENABLE1,
 				   packet, 0xff);
+        regmap_read(adv7511->regmap, ADV7511_REG_PACKET_ENABLE1, &value);
+        printk(KERN_WARNING, "packet_enable (0xff00) Packet %d Register %d Value %d", packet, ADV7511_REG_PACKET_ENABLE0, value);
 	}
+    printk(KERN_WARNING, "END packet_enable()");
 
 	return 0;
 }
 
 static int adv7511_packet_disable(struct adv7511 *adv7511, unsigned int packet)
 {
-	if (packet & 0xff)
+    int value = 0;
+    printk(KERN_WARNING, "START packet_disable()");
+	if (packet & 0xff) {
 		regmap_update_bits(adv7511->regmap, ADV7511_REG_PACKET_ENABLE0,
 				   packet, 0x00);
+        regmap_read(adv7511->regmap, ADV7511_REG_PACKET_ENABLE0, &value);
+        printk(KERN_WARNING, "packet_enable (0xff00) Packet %d Register %d Value %d", packet, ADV7511_REG_PACKET_ENABLE0, value);
+    }
 
 	if (packet & 0xff00) {
+        value = 0;
 		packet >>= 8;
 		regmap_update_bits(adv7511->regmap, ADV7511_REG_PACKET_ENABLE1,
 				   packet, 0x00);
+        regmap_read(adv7511->regmap, ADV7511_REG_PACKET_ENABLE1, &value);
+        printk(KERN_WARNING, "packet_enable (0xff00) Packet %d Register %d Value %d", packet, ADV7511_REG_PACKET_ENABLE1, value);
+
 	}
+    printk(KERN_WARNING, "END packet_disable()");
 
 	return 0;
 }
@@ -238,6 +284,7 @@ static void adv7511_set_config_csc(struct adv7511 *adv7511,
 	bool output_format_422, output_format_ycbcr;
 	unsigned int mode;
 	uint8_t infoframe[17];
+    int b = 0;
 
 	if (adv7511->edid)
 		config.hdmi_mode = drm_detect_hdmi_monitor(adv7511->edid);
@@ -290,26 +337,44 @@ static void adv7511_set_config_csc(struct adv7511 *adv7511,
 		output_format_ycbcr = false;
 	}
 
+    printk(KERN_WARNING, "adv7511_set_config_csc vor packet_disable ENABLE_AVI_INFOFRAME\n");
+
 	adv7511_packet_disable(adv7511, ADV7511_PACKET_ENABLE_AVI_INFOFRAME);
 
 	adv7511_set_colormap(adv7511, config.csc_enable,
 			     config.csc_coefficents,
 			     config.csc_scaling_factor);
 
+    int value = 0;
 	regmap_update_bits(adv7511->regmap, ADV7511_REG_VIDEO_INPUT_CFG1, 0x81,
 			   (output_format_422 << 7) | output_format_ycbcr);
 
+    regmap_read(adv7511->regmap, ADV7511_REG_VIDEO_INPUT_CFG1, &value);
+    printk(KERN_WARNING, "Zeile %d Register %d Value %d\n", __LINE__, ADV7511_REG_VIDEO_INPUT_CFG1, value);
+
 	regmap_update_bits(adv7511->regmap, ADV7511_REG_HDCP_HDMI_CFG,
 			   ADV7511_HDMI_CFG_MODE_MASK, mode);
+
+    regmap_read(adv7511->regmap, ADV7511_REG_HDCP_HDMI_CFG, &value);
+    printk(KERN_WARNING, "Zeile %d Register %d Value %d\n", __LINE__, ADV7511_REG_HDCP_HDMI_CFG, value);
 
 	hdmi_avi_infoframe_pack(&config.avi_infoframe, infoframe,
 				sizeof(infoframe));
 
 	/* The AVI infoframe id is not configurable */
+    printk(KERN_WARNING, "infoframe write\n");
+
 	regmap_bulk_write(adv7511->regmap, ADV7511_REG_AVI_INFOFRAME_VERSION,
 			  infoframe + 1, sizeof(infoframe) - 1);
 
+    for (b = 0; b < sizeof(infoframe); b++) {
+        printk(KERN_WARNING, "infoframe[%d] = %d ", i, infoframe[i]);
+    }
+    printk(KERN_WARNING, "\n");
+
+    printk(KERN_WARNING, "START %d Packet enable PACKET_ENABLE_AVI_INFOFRAME\n", __LINE__);
 	adv7511_packet_enable(adv7511, ADV7511_PACKET_ENABLE_AVI_INFOFRAME);
+    printk(KERN_WARNING, "ENDE Packet enable PACKET_ENABLE_AVI_INFOFRAME\n");
 }
 
 static void adv7511_set_link_config(struct adv7511 *adv7511,
