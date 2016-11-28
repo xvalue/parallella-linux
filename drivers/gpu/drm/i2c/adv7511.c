@@ -9,6 +9,7 @@
 #include <linux/device.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
+#include <linux/printk.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
@@ -185,14 +186,14 @@ static void adv7511_set_colormap(struct adv7511 *adv7511, bool enable,
 					   0x1f, coeff[i] >> 8);
 
             regmap_read(adv7511->regmap, ADV7511_REG_CSC_UPPER(1), &value);
-            printk(KERN_WARNING, "1.loop Register %d value %d\n",ADV7511_REG_CSC_UPPER(i), value); 
+            printk(KERN_WARNING, "1.loop Zeile %d Register %d value %d\n",__LINE__, ADV7511_REG_CSC_UPPER(i), value); 
 
 			regmap_write(adv7511->regmap,
 				     ADV7511_REG_CSC_LOWER(i),
 				     coeff[i] & 0xff);
 
             regmap_read(adv7511->regmap, ADV7511_REG_CSC_UPPER(1), &value);
-            printk(KERN_WARNING, "2.loop Register %d value %d\n",ADV7511_REG_CSC_LOWER(i), value); 
+            printk(KERN_WARNING, "2.loop Zeile %d Register %d value %d\n", __LINE__, ADV7511_REG_CSC_LOWER(i), value); 
 		}
 	}
 
@@ -201,23 +202,23 @@ static void adv7511_set_colormap(struct adv7511 *adv7511, bool enable,
 		regmap_update_bits(adv7511->regmap, ADV7511_REG_CSC_UPPER(0),
 				   0xe0, 0x80 | (scaling_factor << 5));
         regmap_read(adv7511->regmap, ADV7511_REG_CSC_UPPER(0), &value);
-        printk(KERN_WARNING, "enable=true Register %d Value %d\n", ADV7511_REG_CSC_UPPER(0), value);
+        printk(KERN_WARNING, "enable=true REG_CSC_UPPER(0) Zeile %d Value %d\n", __LINE__, value);
     }
 	else {
         int value = 0;
         regmap_update_bits(adv7511->regmap, ADV7511_REG_CSC_UPPER(0),
                 0x80, 0x00);
         regmap_read(adv7511->regmap, ADV7511_REG_CSC_UPPER(0), &value);
-        printk(KERN_WARNING, "enable=false Register %d Value %d\n", ADV7511_REG_CSC_UPPER(0), value);
+        printk(KERN_WARNING, "enable=false REG_CSC_UPPER(0) Zeile %d Value %d\n", __LINE__, value);
         }
 
     int value = 0;
 	regmap_update_bits(adv7511->regmap, ADV7511_REG_CSC_UPPER(1),
 			   ADV7511_CSC_UPDATE_MODE, 0);
     regmap_read(adv7511->regmap, ADV7511_REG_CSC_UPPER(1), &value);
-    printk(KERN_WARNING, "Zeile %d Register %d Value %d\n", __LINE__, ADV7511_REG_CSC_UPPER(0), value);
+    printk(KERN_WARNING, "REG_CSC_UPPER(0) Zeile %d Value %d\n", __LINE__, value);
 
-    printk(KERN_WARNING, "END OF set_colormap()");
+    printk(KERN_WARNING, "END OF set_colormap()\n");
 }
 
 static int adv7511_packet_enable(struct adv7511 *adv7511, unsigned int packet)
@@ -228,7 +229,7 @@ static int adv7511_packet_enable(struct adv7511 *adv7511, unsigned int packet)
 		regmap_update_bits(adv7511->regmap, ADV7511_REG_PACKET_ENABLE0,
 				   packet, 0xff);
         regmap_read(adv7511->regmap, ADV7511_REG_PACKET_ENABLE0, &value);
-        printk(KERN_WARNING, "packet_enable (0xff) Packet %d Register %d Value %d", packet, ADV7511_REG_PACKET_ENABLE0, value);
+        printk(KERN_WARNING, "packet_enable (0xff) Zeile %d Packet %d REG_PACKET_ENABLE0 Value %d\n", __LINE__, packet, value);
     }
 
 	if (packet & 0xff00) {
@@ -237,9 +238,9 @@ static int adv7511_packet_enable(struct adv7511 *adv7511, unsigned int packet)
 		regmap_update_bits(adv7511->regmap, ADV7511_REG_PACKET_ENABLE1,
 				   packet, 0xff);
         regmap_read(adv7511->regmap, ADV7511_REG_PACKET_ENABLE1, &value);
-        printk(KERN_WARNING, "packet_enable (0xff00) Packet %d Register %d Value %d", packet, ADV7511_REG_PACKET_ENABLE0, value);
+        printk(KERN_WARNING, "packet_enable (0xff00) REG_PACKET_ENABLE0 Zeile %d Packet %d Value %d\n", __LINE__, packet, value);
 	}
-    printk(KERN_WARNING, "END packet_enable()");
+    printk(KERN_WARNING, "END packet_enable()\n");
 
 	return 0;
 }
@@ -247,12 +248,12 @@ static int adv7511_packet_enable(struct adv7511 *adv7511, unsigned int packet)
 static int adv7511_packet_disable(struct adv7511 *adv7511, unsigned int packet)
 {
     int value = 0;
-    printk(KERN_WARNING, "START packet_disable()");
+    printk(KERN_WARNING, "START packet_disable()\n");
 	if (packet & 0xff) {
 		regmap_update_bits(adv7511->regmap, ADV7511_REG_PACKET_ENABLE0,
 				   packet, 0x00);
         regmap_read(adv7511->regmap, ADV7511_REG_PACKET_ENABLE0, &value);
-        printk(KERN_WARNING, "packet_enable (0xff00) Packet %d Register %d Value %d", packet, ADV7511_REG_PACKET_ENABLE0, value);
+        printk(KERN_WARNING, "packet_enable (0xff) Zeile %d REG_PACKET_ENABLE0 Packet %d Value %d\n", _LINE__, packet, value);
     }
 
 	if (packet & 0xff00) {
@@ -261,10 +262,10 @@ static int adv7511_packet_disable(struct adv7511 *adv7511, unsigned int packet)
 		regmap_update_bits(adv7511->regmap, ADV7511_REG_PACKET_ENABLE1,
 				   packet, 0x00);
         regmap_read(adv7511->regmap, ADV7511_REG_PACKET_ENABLE1, &value);
-        printk(KERN_WARNING, "packet_enable (0xff00) Packet %d Register %d Value %d", packet, ADV7511_REG_PACKET_ENABLE1, value);
+        printk(KERN_WARNING, "packet_enable (0xff00) Zeile %d REG_PACKET_ENABLE1 Packet %d Value %d\n", _LINE__, packet, value);
 
 	}
-    printk(KERN_WARNING, "END packet_disable()");
+    printk(KERN_WARNING, "END packet_disable()\n");
 
 	return 0;
 }
@@ -350,13 +351,13 @@ static void adv7511_set_config_csc(struct adv7511 *adv7511,
 			   (output_format_422 << 7) | output_format_ycbcr);
 
     regmap_read(adv7511->regmap, ADV7511_REG_VIDEO_INPUT_CFG1, &value);
-    printk(KERN_WARNING, "Zeile %d Register %d Value %d\n", __LINE__, ADV7511_REG_VIDEO_INPUT_CFG1, value);
+    printk(KERN_WARNING, "Zeile %d REG_VIDEO_INPUT_CFG1 Value %d\n", __LINE__, value);
 
 	regmap_update_bits(adv7511->regmap, ADV7511_REG_HDCP_HDMI_CFG,
 			   ADV7511_HDMI_CFG_MODE_MASK, mode);
 
     regmap_read(adv7511->regmap, ADV7511_REG_HDCP_HDMI_CFG, &value);
-    printk(KERN_WARNING, "Zeile %d Register %d Value %d\n", __LINE__, ADV7511_REG_HDCP_HDMI_CFG, value);
+    printk(KERN_WARNING, "Zeile %d REG_HDCP_HDMI_CFG _Value %d\n", __LINE__, value);
 
 	hdmi_avi_infoframe_pack(&config.avi_infoframe, infoframe,
 				sizeof(infoframe));
@@ -374,6 +375,7 @@ static void adv7511_set_config_csc(struct adv7511 *adv7511,
 
     printk(KERN_WARNING, "START %d Packet enable PACKET_ENABLE_AVI_INFOFRAME\n", __LINE__);
 	adv7511_packet_enable(adv7511, ADV7511_PACKET_ENABLE_AVI_INFOFRAME);
+
     printk(KERN_WARNING, "ENDE Packet enable PACKET_ENABLE_AVI_INFOFRAME\n");
 }
 
