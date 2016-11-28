@@ -389,6 +389,7 @@ static void adv7511_set_link_config(struct adv7511 *adv7511,
 	unsigned int clock_delay;
 	unsigned int color_depth;
 	unsigned int input_id;
+    int value = 0;
 
 	clock_delay = (config->clock_delay + 1200) / 400;
 	color_depth = config->input_color_depth == 8 ? 3
@@ -405,34 +406,66 @@ static void adv7511_set_link_config(struct adv7511 *adv7511,
 	else
 		input_id = config->embedded_sync ? 2 : 1;
 
+    printk("START set_link_config()\n");
 	regmap_update_bits(adv7511->regmap, ADV7511_REG_I2C_FREQ_ID_CFG, 0xf,
 			   input_id);
+    regmap_read(adv7511->regmap, ADV7511_REG_I2C_FREQ_ID_CFG, &value);
+
+    printk("REG_I2C_FREQ_ID_CFG Zeile %d, Value = %d\n", __LINE__, value);
+
 	regmap_update_bits(adv7511->regmap, ADV7511_REG_VIDEO_INPUT_CFG1, 0x7e,
 			   (color_depth << 4) |
 			   (input_styles[config->input_style] << 2));
+
+    regmap_read(adv7511->regmap, ADV7511_REG_VIDEO_INPUT_CFG1, &value);
+    printk("REG_VIDEO_INPUT_CFG1 Zeile %d, Value = %d\n", __LINE__, value);
+
 	regmap_write(adv7511->regmap, ADV7511_REG_VIDEO_INPUT_CFG2,
 		     config->input_justification << 3);
+
+    regmap_read(adv7511->regmap, ADV7511_REG_VIDEO_INPUT_CFG2, &value);
+    printk("REG_VIDEO_INPUT_CFG2 Zeile %d, Value = %d\n", __LINE__, value);
+
 	regmap_write(adv7511->regmap, ADV7511_REG_TIMING_GEN_SEQ,
 		     config->sync_pulse << 2);
+    regmap_read(adv7511->regmap, ADV7511_REG_TIMING_GEN_SEQ, &value);
+    printk("REG_TIMING_GEN_SEQ Zeile %d, Value = %d\n", __LINE__, value);
 
 	regmap_write(adv7511->regmap, 0xba, clock_delay << 5);
+
+    regmap_read(adv7511->regmap, 0xba, &value);
+    printk("0xba Zeile %d, Value = %d\n", __LINE__, value);
 
 	adv7511->embedded_sync = config->embedded_sync;
 	adv7511->hsync_polarity = config->hsync_polarity;
 	adv7511->vsync_polarity = config->vsync_polarity;
 	adv7511->rgb = config->input_colorspace == HDMI_COLORSPACE_RGB;
+
+    printk("END set_link_config()\n");
 }
 
 static void adv7511_power_on(struct adv7511 *adv7511)
 {
+    int value = 0;
+    printk(KERN_WARNING, "START power_one()\n");
 	adv7511->current_edid_segment = -1;
 
 	regmap_write(adv7511->regmap, ADV7511_REG_INT(0),
 		     ADV7511_INT0_EDID_READY);
+    regmap_read(ADV7511->regmap, ADV7511_REG_INT(0), &value);
+    printk(KERN_WARNING, "ADV7511_REG_INT(0) Zeile %d Value %d", __LINE__, value);
+
 	regmap_write(adv7511->regmap, ADV7511_REG_INT(1),
 		     ADV7511_INT1_DDC_ERROR);
+
+    regmap_read(ADV7511->regmap, ADV7511_REG_INT(1), &value);
+    printk(KERN_WARNING, "ADV7511_REG_INT(1) Zeile %d Value %d", __LINE__, value);
+
 	regmap_update_bits(adv7511->regmap, ADV7511_REG_POWER,
 			   ADV7511_POWER_POWER_DOWN, 0);
+
+    regmap_read(ADV7511->regmap, ADV7511_REG_POWER, &value);
+    printk(KERN_WARNING, "ADV7511_REG_POWER Zeile %d Value %d", __LINE__, value);
 
 	/*
 	 * Per spec it is allowed to pulse the HDP signal to indicate that the
@@ -446,12 +479,16 @@ static void adv7511_power_on(struct adv7511 *adv7511)
 			   ADV7511_REG_POWER2_HDP_SRC_MASK,
 			   ADV7511_REG_POWER2_HDP_SRC_NONE);
 
+    regmap_read(ADV7511->regmap, ADV7511_REG_POWER2, &value);
+    printk(KERN_WARNING, "ADV7511_REG_POWER2 Zeile %d Value %d", __LINE__, value);
+
 	/*
 	 * Most of the registers are reset during power down or when HPD is low.
 	 */
 	regcache_sync(adv7511->regmap);
 
 	adv7511->powered = true;
+    printk(KERN_WARNING, "END power_one()\n");
 }
 
 static void adv7511_power_off(struct adv7511 *adv7511)
@@ -473,6 +510,8 @@ static bool adv7511_hpd(struct adv7511 *adv7511)
 {
 	unsigned int irq0;
 	int ret;
+    int value = 0;
+    printk(KERN_WARNING, "START HPD()\n");
 
 	ret = regmap_read(adv7511->regmap, ADV7511_REG_INT(0), &irq0);
 	if (ret < 0)
@@ -481,8 +520,13 @@ static bool adv7511_hpd(struct adv7511 *adv7511)
 	if (irq0 & ADV7511_INT0_HDP) {
 		regmap_write(adv7511->regmap, ADV7511_REG_INT(0),
 			     ADV7511_INT0_HDP);
+
+        regmap_read(adv7511->regmap, ADV7511_REG_INT(0), &value);
+        printk(KERN_WARNING, "REG_INT(0) Zeile %d Value %d\n", __LINE__, value);
+
 		return true;
 	}
+    printk(KERN_WARNING, "END HPD()\n");
 
 	return false;
 }
@@ -491,6 +535,7 @@ static int adv7511_irq_process(struct adv7511 *adv7511)
 {
 	unsigned int irq0, irq1;
 	int ret;
+    int value = 0;
 
 	ret = regmap_read(adv7511->regmap, ADV7511_REG_INT(0), &irq0);
 	if (ret < 0)
@@ -502,6 +547,12 @@ static int adv7511_irq_process(struct adv7511 *adv7511)
 
 	regmap_write(adv7511->regmap, ADV7511_REG_INT(0), irq0);
 	regmap_write(adv7511->regmap, ADV7511_REG_INT(1), irq1);
+
+	regmap_read(adv7511->regmap, ADV7511_REG_INT(0), &value);
+    printk(KERN_WARNING, "REG_INT(0) Zeile %d Value = %d\n", __LINE__, value);
+
+	regmap_read(adv7511->regmap, ADV7511_REG_INT(1), &value);
+    printk(KERN_WARNING, "REG_INT(1) Zeile %d Value = %d\n", __LINE__, value);
 
 	if (irq0 & ADV7511_INT0_HDP && adv7511->encoder)
 		drm_helper_hpd_irq_event(adv7511->encoder->dev);
@@ -561,6 +612,7 @@ static int adv7511_get_edid_block(void *data, u8 *buf, unsigned int block,
 	unsigned int i;
 	int ret;
 
+    printk(KERN_WARNING, "START edid_block\n");
 	if (len > 128)
 		return -EINVAL;
 
@@ -616,6 +668,7 @@ static int adv7511_get_edid_block(void *data, u8 *buf, unsigned int block,
 	else
 		memcpy(buf, adv7511->edid_buf + 128, len);
 
+    printk(KERN_WARNING, "END edid_block\n");
 	return 0;
 }
 
@@ -629,24 +682,41 @@ static int adv7511_get_modes(struct drm_encoder *encoder,
 	struct adv7511 *adv7511 = encoder_to_adv7511(encoder);
 	struct edid *edid;
 	unsigned int count;
+    int value = 0;
 
+    printk(KERN_WARNING, "START get_modes()\n"); 
 	/* Reading the EDID only works if the device is powered */
 	if (!adv7511->powered) {
 		regmap_write(adv7511->regmap, ADV7511_REG_INT(0),
 			     ADV7511_INT0_EDID_READY);
+
+        regmap_read(ADV7511->regmap, ADV7511_REG_INT(0), &value);
+        printk(KERN_WARNING, "REG_INT(0) Zeile %d value %d\n", __LINE__, value);
+
 		regmap_write(adv7511->regmap, ADV7511_REG_INT(1),
 			     ADV7511_INT1_DDC_ERROR);
+
+        regmap_read(ADV7511->regmap, ADV7511_REG_INT(1), &value);
+        printk(KERN_WARNING, "REG_INT(1) Zeile %d value %d\n", __LINE__, value);
+
 		regmap_update_bits(adv7511->regmap, ADV7511_REG_POWER,
 				   ADV7511_POWER_POWER_DOWN, 0);
+
+        regmap_read(ADV7511->regmap, ADV7511_REG_POWER, &value);
+        printk(KERN_WARNING, "REG_POWER Zeile %d value %d\n", __LINE__, value);
+
 		adv7511->current_edid_segment = -1;
 	}
 
 	edid = drm_do_get_edid(connector, adv7511_get_edid_block, adv7511);
 
-	if (!adv7511->powered)
+	if (!adv7511->powered) {
 		regmap_update_bits(adv7511->regmap, ADV7511_REG_POWER,
 				   ADV7511_POWER_POWER_DOWN,
 				   ADV7511_POWER_POWER_DOWN);
+        regmap_read(ADV7511->regmap, ADV7511_REG_POWER, &value);
+        printk(KERN_WARNING, "REG_POWER Zeile %d value %d\n", __LINE__, value);
+    }
 
 	kfree(adv7511->edid);
 	adv7511->edid = edid;
@@ -658,6 +728,7 @@ static int adv7511_get_modes(struct drm_encoder *encoder,
 
 	adv7511_set_config_csc(adv7511, connector, adv7511->rgb);
 
+    printk(KERN_WARNING, "END get_modes()\n"); 
 	return count;
 }
 
@@ -680,6 +751,7 @@ adv7511_encoder_detect(struct drm_encoder *encoder,
 	unsigned int val;
 	bool hpd;
 	int ret;
+    int value = 0;
 
 	ret = regmap_read(adv7511->regmap, ADV7511_REG_STATUS, &val);
 	if (ret < 0)
@@ -731,6 +803,9 @@ static void adv7511_encoder_mode_set(struct drm_encoder *encoder,
 	unsigned int hsync_polarity = 0;
 	unsigned int vsync_polarity = 0;
 
+    int value = 0;
+    printk(KERN_WARNING, "START encoder_mode_set()\n");
+
 	if (adv7511->embedded_sync) {
 		unsigned int hsync_offset, hsync_len;
 		unsigned int vsync_offset, vsync_len;
@@ -749,19 +824,38 @@ static void adv7511_encoder_mode_set(struct drm_encoder *encoder,
 
 		regmap_write(adv7511->regmap, ADV7511_REG_HSYNC_PLACEMENT_MSB,
 			     ((hsync_offset >> 10) & 0x7) << 5);
+        printk(KERN_WARNING, "REG_HSYNC_PALCemENT_MSB Zeile %d Value %d", __LINE__, ((hsync_offset >> 10) & 0x7 << 5));
+
 		regmap_write(adv7511->regmap, ADV7511_REG_SYNC_DECODER(0),
 			     (hsync_offset >> 2) & 0xff);
+        printk(KERN_WARNING, "REG_SYNC_DECODER(0) Zeile %d value %d\n", ((hsync_offset >> 2) & 0xff));
+
 		regmap_write(adv7511->regmap, ADV7511_REG_SYNC_DECODER(1),
 			     ((hsync_offset & 0x3) << 6) |
 			     ((hsync_len >> 4) & 0x3f));
+
+        value = (((hsync_offset & 0x3) << 6) | (hsync_len >> 4) & 0x3f);
+        printk(KERN_WARNING, "REG_SYNC_DECODER(1) Zeile %d value %d \n", __LINE__, value);
+
 		regmap_write(adv7511->regmap, ADV7511_REG_SYNC_DECODER(2),
 			     ((hsync_len & 0xf) << 4) |
 			     ((vsync_offset >> 6) & 0xf));
+
+        value = ( ((hsync_len & 0xf) << 4) | ((vsync_offset >> 6) & 0xf));
+        printk(KERN_WARNING, "REG_SYNC_DECODER(2) Zeile %d value %d \n", __LINE__, value);
+
 		regmap_write(adv7511->regmap, ADV7511_REG_SYNC_DECODER(3),
 			     ((vsync_offset & 0x3f) << 2) |
 			     ((vsync_len >> 8) & 0x3));
+
+        value = (((vsync_offset & 0x3f) << 2) | ((vsync_len >> 8) & 0x3));
+        printk(KERN_WARNING, "REG_SYNC_DECODER(3) Zeile %d value %d \n", __LINE__, value);
+        
 		regmap_write(adv7511->regmap, ADV7511_REG_SYNC_DECODER(4),
 			     vsync_len & 0xff);
+
+        value = vsync_len & 0xff;
+        printk(KERN_WARNING, "REG_SYNC_DECODER(4) Zeile %d value %d \n", __LINE__, value);
 
 		hsync_polarity = !(adj_mode->flags & DRM_MODE_FLAG_PHSYNC);
 		vsync_polarity = !(adj_mode->flags & DRM_MODE_FLAG_PVSYNC);
@@ -806,8 +900,15 @@ static void adv7511_encoder_mode_set(struct drm_encoder *encoder,
 
 	regmap_update_bits(adv7511->regmap, 0xfb,
 		0x6, low_refresh_rate << 1);
+
+    regmap_read(adv7511->regmap, 0xfb, &value);
+    printk(KERN_WARNING, "0xfb Zeile %d value %d\n", __LINE__, value);
+
 	regmap_update_bits(adv7511->regmap, 0x17,
 		0x60, (vsync_polarity << 6) | (hsync_polarity << 5));
+
+    regmap_read(adv7511->regmap, 0x17, &value);
+    printk(KERN_WARNING, "0x17 Zeile %d value %d\n", __LINE__, value);
 
 	/*
 	 * TODO Test first order 4:2:2 to 4:4:4 up conversion method, which is
@@ -815,6 +916,7 @@ static void adv7511_encoder_mode_set(struct drm_encoder *encoder,
 	 */
 
 	adv7511->f_tmds = mode->clock;
+    printk(KERN_WARNING, "END encoder_mode_set()\n");
 }
 
 static struct drm_encoder_slave_funcs adv7511_encoder_funcs = {
@@ -925,7 +1027,9 @@ static int adv7511_probe(struct i2c_client *i2c, const struct i2c_device_id *id)
 	struct device *dev = &i2c->dev;
 	unsigned int val;
 	int ret;
+    int value = 0;
 
+    printk(KERN_WARNING, "START probe()\n");
 	if (!dev->of_node)
 		return -EINVAL;
 
@@ -968,10 +1072,16 @@ static int adv7511_probe(struct i2c_client *i2c, const struct i2c_device_id *id)
 		return ret;
 
 	regmap_write(adv7511->regmap, ADV7511_REG_EDID_I2C_ADDR, edid_i2c_addr);
+    printk(KERN_WARNING, "REG_EDID_I2C_ADDR Zeile %d value %d\n", __LINE__, edid_i2c_addr);
+
 	regmap_write(adv7511->regmap, ADV7511_REG_PACKET_I2C_ADDR,
 		     packet_i2c_addr);
+    printk(KERN_WARNING, "REG_PACKET_I2C_ADDR Zeile %d value %d\n", __LINE__, edid_i2c_addr);
+
 	regmap_write(adv7511->regmap, ADV7511_REG_CEC_I2C_ADDR, cec_i2c_addr);
+    printk(KERN_WARNING, "REG_CEC_I2C_ADDR Zeile %d value %d\n", __LINE__, cec_i2c_addr);
 	adv7511_packet_disable(adv7511, 0xffff);
+    printk(KERN_WARNING, "packet_disable 0xffff\n");
 
 	adv7511->i2c_main = i2c;
 	adv7511->i2c_edid = i2c_new_dummy(i2c->adapter, edid_i2c_addr >> 1);
@@ -992,6 +1102,7 @@ static int adv7511_probe(struct i2c_client *i2c, const struct i2c_device_id *id)
 	/* CEC is unused for now */
 	regmap_write(adv7511->regmap, ADV7511_REG_CEC_CTRL,
 		     ADV7511_CEC_CTRL_POWER_DOWN);
+    printk(KERN_WARNING, "REG_CEC_CTRL Zeile %d value %d\n", __LINE__, ADV7511_CEC_CTRL_POWER_DOWN);
 
 	adv7511_power_off(adv7511);
 
@@ -999,6 +1110,7 @@ static int adv7511_probe(struct i2c_client *i2c, const struct i2c_device_id *id)
 
 	adv7511_set_link_config(adv7511, &link_config);
 
+    printk(KERN_WARNING, "END probe()\n");
 	return 0;
 
 err_i2c_unregister_device:
