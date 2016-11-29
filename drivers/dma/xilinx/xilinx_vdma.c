@@ -34,6 +34,7 @@
 #include <linux/of_platform.h>
 #include <linux/of_irq.h>
 #include <linux/slab.h>
+#include <linux/printk.h>
 
 #include "../dmaengine.h"
 
@@ -258,7 +259,7 @@ struct xilinx_vdma_device {
 /* IO accessors */
 static inline u32 vdma_read(struct xilinx_vdma_chan *chan, u32 reg)
 {
-    printk(KERN_WARNING, "VDMA BASE %p\n" chan->xdev->regs);
+    printk(KERN_WARNING, "VDMA BASE %p\n", chan->xdev->regs);
 	return ioread32(chan->xdev->regs + reg);
 }
 
